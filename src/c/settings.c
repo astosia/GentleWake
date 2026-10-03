@@ -13,7 +13,11 @@
 #define NUM_ALARM_MENU_SECTIONS 1
 
 #define NUM_MAIN_MENU_ALARM_ITEMS 1
+#if ALARM_SOUND
+#define NUM_MAIN_MENU_MISC_ITEMS 7
+#else
 #define NUM_MAIN_MENU_MISC_ITEMS 6
+#endif
 #define NUM_MAIN_MENU_SMART_ITEMS 4
 #define NUM_MAIN_MENU_DST_ITEMS 2
 #define NUM_MAIN_MENU_ABOUT_ITEMS 1
@@ -33,6 +37,7 @@
 #define MAIN_MENU_KONAMICODE_ITEM 3
 #define MAIN_MENU_VIBEPATTERN_ITEM 4
 #define MAIN_MENU_AUTOCLOSE_ITEM 5
+#define MAIN_MENU_ALARMSOUND_ITEM 6
 
 #define MAIN_MENU_SMARTALARM_ITEM 0
 #define MAIN_MENU_SMARTPERIOD_ITEM 1
@@ -192,6 +197,30 @@ static bool is_alarms_mixed() {
 }
 
 // Draw menu items
+#if ALARM_SOUND
+// Name shown in the menu for each alarm sound option
+static const char* alarm_sound_name(uint8_t sound) {
+  switch (sound) {
+    case AS_VibeChime: return "Vibrate + Chime";
+    case AS_VibeBeeps: return "Vibrate + Beeps";
+    case AS_ChimeOnly: return "Chime only";
+    case AS_BeepsOnly: return "Beeps only";
+    default:           return "Vibrate only";
+  }
+}
+
+// Plays a short sample of the chosen alarm sound (nothing for vibrate only, or if the speaker is muted)
+static void preview_alarm_sound(uint8_t sound) {
+  // Only stop the speaker if it is playing (stopping it when idle can make it pop)
+  if (speaker_get_status() != SpeakerStatusIdle) speaker_stop();
+  if (sound == AS_VibeOnly || speaker_is_muted()) return;
+  if (sound == AS_VibeChime || sound == AS_ChimeOnly)
+    speaker_play_tone(659, 300, 50, SpeakerWaveformSine);     // E5, soft
+  else
+    speaker_play_tone(1047, 200, 50, SpeakerWaveformSquare);  // C6 beep
+}
+#endif
+
 static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuIndex *cell_index, void *data) {
   char alarm_summary[16];
   bool is_mixed = false;
@@ -325,6 +354,12 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
               }
               menu_cell_basic_draw(ctx, cell_layer, "Auto Close", autoclose_str, NULL);
               break;
+#if ALARM_SOUND
+            case MAIN_MENU_ALARMSOUND_ITEM:
+              // Show the alarm sound setting
+              menu_cell_basic_draw(ctx, cell_layer, "Alarm Sound", alarm_sound_name(s_settings->alarm_sound), NULL);
+              break;
+#endif
           }
           break;
     
@@ -541,6 +576,14 @@ static void menu_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, v
               break;
             case MAIN_MENU_AUTOCLOSE_ITEM:
               s_settings->autoclose_timeout = (s_settings->autoclose_timeout + 1) % 11;
+              break;
+#if ALARM_SOUND
+            case MAIN_MENU_ALARMSOUND_ITEM:
+              // Cycle through the sound options and play a short preview of the new one
+              s_settings->alarm_sound = (s_settings->alarm_sound + 1) % AS_Count;
+              preview_alarm_sound(s_settings->alarm_sound);
+              break;
+#endif
           }
           break;
         

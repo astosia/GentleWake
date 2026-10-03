@@ -574,8 +574,89 @@ static void set_onetime_enabled(bool enabled) {
 
 static void start_accel();
 
+#if ALARM_SOUND
+// Notes for one alarm step. Each vibration segment can become a note plus a rest (for the chime),
+// and a step has at most 5 segments
+#define MAX_ALARM_NOTES 10
+static SpeakerNote s_alarm_notes[MAX_ALARM_NOTES];
+
+// Stops the speaker, but only if it is actually playing (stopping it mid-tone, or when it is
+// already idle, can make the speaker pop)
+static void stop_speaker_if_playing() {
+  if (speaker_get_status() != SpeakerStatusIdle) speaker_stop();
+}
+
+// Adds a note to the alarm sound, trimming it so the whole sound stays within max_ms.
+// Returns false once the time budget is used up.
+static bool add_alarm_note(uint8_t *n, uint32_t *total_ms, uint32_t max_ms, uint8_t midi_note, SpeakerWaveform waveform, uint32_t dur) {
+  if (*n >= MAX_ALARM_NOTES || *total_ms >= max_ms) return false;
+  if (*total_ms + dur > max_ms) dur = max_ms - *total_ms;
+  s_alarm_notes[(*n)++] = (SpeakerNote){ .midi_note = midi_note, .waveform = waveform, .duration_ms = dur };
+  *total_ms += dur;
+  return true;
+}
+
+// Plays the sound for one step of the alarm, timed to match that step's vibration segments
+// (segments alternate on/off, starting with on). The volume rises from quiet on the first step
+// to full volume on the last. The sound is trimmed to max_ms so that it always finishes before
+// the next step starts and never has to be cut off (which pops). Returns true if a sound started.
+static bool play_alarm_sound(const uint32_t *segments, uint8_t num_segments, uint8_t step, uint8_t num_steps, bool strong, uint32_t max_ms) {
+  uint8_t mode = s_settings.alarm_sound;
+  if (mode == AS_VibeOnly || speaker_is_muted()) return false;
+  
+  bool chime = (mode == AS_VibeChime || mode == AS_ChimeOnly);
+  uint8_t n = 0;
+  uint8_t on_count = 0;
+  uint32_t total_ms = 0;
+  
+  for (uint8_t i = 0; i < num_segments; i++) {
+    uint32_t dur = segments[i];
+    bool ok;
+    if (i % 2 == 0) {
+      // "On" segment
+      if (chime) {
+        // Soft sine chime: a short "ding" (alternating E5 and C5) followed by a rest for the
+        // remainder of the segment, so it sounds like a bell rather than a continuous tone
+        uint32_t ding = dur < 250 ? dur : 250;
+        ok = add_alarm_note(&n, &total_ms, max_ms, (on_count % 2) ? 72 : 76, SpeakerWaveformSine, ding);
+        if (ok && dur > ding)
+          ok = add_alarm_note(&n, &total_ms, max_ms, 0, SpeakerWaveformSine, dur - ding);
+      } else {
+        // Beep for exactly as long as the motor buzzes (C6, square wave)
+        ok = add_alarm_note(&n, &total_ms, max_ms, 84, SpeakerWaveformSquare, dur);
+      }
+      on_count++;
+    } else {
+      // "Off" segment: silence
+      ok = add_alarm_note(&n, &total_ms, max_ms, 0, SpeakerWaveformSine, dur);
+    }
+    if (!ok) break;
+  }
+  
+  // Drop any silence at the end, so playback finishes as soon as the last sound does
+  while (n > 0 && s_alarm_notes[n - 1].midi_note == 0) n--;
+  if (n == 0) return false;
+  
+  // Gentle patterns start quietly; Not-So-Gentle and Get Out Of Bed start louder
+  uint8_t start_volume = strong ? 50 : 15;
+  uint8_t volume = (num_steps > 1) ? start_volume + ((100 - start_volume) * step) / (num_steps - 1) : 100;
+  
+  // The previous step's sound should have finished by now (see max_ms), but make sure
+  stop_speaker_if_playing();
+  return speaker_play_notes(s_alarm_notes, n, volume);
+}
+#endif
+
+// Stops any alarm sound that is playing
+static void stop_alarm_sound() {
+#if ALARM_SOUND
+  stop_speaker_if_playing();
+#endif
+}
+
 // Turns off an active alarm or cancels a snooze and sets wakeup for next alarm
 static void reset_alarm() {
+  stop_alarm_sound();
   int8_t next;
   
   s_alarm_active = false;
@@ -619,6 +700,7 @@ static void reset_alarm() {
 
 // Snoozes active alarm
 static void snooze_alarm() {
+  stop_alarm_sound();
   set_snoozing(true);
   set_snoozecount(s_state.snooze_count + 1);
   
@@ -704,7 +786,21 @@ static void vibe_alarm() {
       VibePattern pat;
       pat.durations = vibe_segments[vibe_patterns[s_vibe_count][1]];
       pat.num_segments = vibe_patterns[s_vibe_count][2];
-      vibes_enqueue_custom_pattern(pat);
+      
+      bool vibrate = true;
+#if ALARM_SOUND
+      // Play the matching sound (if one is selected)
+      bool strong = s_goob_active || (vibe_segments == vibe_segments_strong);
+      // Sound must end 150 ms before the next step starts (the step delay is in seconds)
+      uint32_t max_sound_ms = (vibe_patterns[s_vibe_count][0] * 1000) - 150;
+      bool sound_playing = play_alarm_sound(pat.durations, pat.num_segments, s_vibe_count, pattern_length, strong, max_sound_ms);
+      // The sound-only options skip the vibration, but only if the sound actually started.
+      // If the speaker is muted (e.g. Quiet Time) or unavailable, vibrate anyway so the alarm
+      // is never silent.
+      if (sound_playing && (s_settings.alarm_sound == AS_ChimeOnly || s_settings.alarm_sound == AS_BeepsOnly))
+        vibrate = false;
+#endif
+      if (vibrate) vibes_enqueue_custom_pattern(pat);
       
       s_vibe_count++;
     }
@@ -1314,6 +1410,7 @@ static void update_app_glance(AppGlanceReloadSession *session, size_t limit, voi
 
 static void deinit(void) {
   
+  stop_alarm_sound();
   if (s_accel_service_sub) accel_data_service_unsubscribe();
 #ifndef PBL_PLATFORM_APLITE
   app_glance_reload(update_app_glance, NULL);

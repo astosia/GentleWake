@@ -36,6 +36,14 @@
 #define IF_BIG_ELSE(big, small) (small)
 #endif
 
+// Alarm sounds: the Pebble Time 2 (emery) and Pebble 2 Duo (flint) have speakers.
+// The Round 2 (gabbro) has no speaker, so it is excluded explicitly.
+#if defined(PBL_SPEAKER) && (defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT))
+#define ALARM_SOUND 1
+#else
+#define ALARM_SOUND 0
+#endif
+
 // Width of the (narrowed) action bar on rectangular watches. Every window uses this
 // value so the action bar stays the same width when moving between screens.
 #ifdef PBL_RECT
@@ -67,6 +75,16 @@ typedef enum VibePatterns {
   VP_NSG2Snooze = 2
 } VibePatterns;
 
+// Alarm sound options (only offered on watches with a speaker - see ALARM_SOUND above)
+typedef enum AlarmSound {
+  AS_VibeOnly = 0,
+  AS_VibeChime = 1,
+  AS_VibeBeeps = 2,
+  AS_ChimeOnly = 3,
+  AS_BeepsOnly = 4,
+  AS_Count = 5
+} AlarmSound;
+
 typedef enum GooBMode {
   GM_Off = 0,
   GM_AfterAlarm = 1,
@@ -88,6 +106,8 @@ struct Settings_st {
   uint8_t autoclose_timeout;
   GooBMode goob_mode;
   uint8_t goob_monitor_period;
+  uint8_t alarm_sound;   // AlarmSound value. Added in 4.1 at the end of the struct, so settings
+                         // saved by older versions load with this as 0 (vibrate only).
 } __attribute__((__packed__));
 
 typedef enum AlarmDay {
