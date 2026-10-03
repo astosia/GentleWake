@@ -26,8 +26,10 @@ ActionBarLayer* actionbar_create(Window *win, Layer *root_layer, const GRect *bo
   action_bar_layer_set_icon(actionbarlayer, BUTTON_ID_SELECT, bmp_sel);
   action_bar_layer_set_icon(actionbarlayer, BUTTON_ID_DOWN, bmp_down);
 #ifdef PBL_RECT
-  layer_set_frame(action_bar_layer_get_layer(actionbarlayer), GRect(bounds->size.w-20, 0, 20, bounds->size.h));
-  IF_3(layer_set_bounds(action_bar_layer_get_layer(actionbarlayer), GRect(-5, 0, 30, bounds->size.h)));
+  layer_set_frame(action_bar_layer_get_layer(actionbarlayer),
+                  GRect(bounds->size.w-ACTION_BAR_WIDTH, 0, ACTION_BAR_WIDTH, bounds->size.h));
+  IF_3(layer_set_bounds(action_bar_layer_get_layer(actionbarlayer),
+                        GRect(-5, 0, ACTION_BAR_WIDTH+10, bounds->size.h)));
 #endif
   layer_add_child(root_layer, action_bar_layer_get_layer(actionbarlayer));
   return actionbarlayer;

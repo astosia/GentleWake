@@ -12,11 +12,16 @@ static char current_time[] = "00:00 AM";
 static char s_time_digits[8];
 static char s_time_ampm[3];
 static bool s_alarms_on;
-static char s_info[45];
+static char s_info[48];
 static char s_onoff_text[40];
 static enum onoff_modes s_onoff_mode;
 static uint8_t s_autoclose_timeout;
 static AppTimer *s_autoclose_timer;
+static bool s_konami_on = false;
+
+// Second line of the info box while an alarm is ringing, snoozing or monitoring. With the
+// Konami code on, a double click opens the code screen rather than stopping the alarm.
+#define STOP_HINT() (s_konami_on ? "2 clicks for code" : "2 clicks to stop")
 
 static GBitmap *s_res_img_snooze;
 
@@ -25,25 +30,57 @@ static GBitmap *s_res_img_standby;
 static GBitmap *s_res_img_settings;
 static GFont s_res_clock_font;
 static GFont s_res_ampm_font;
-static GFont s_res_gothic_18_bold;
+static GFont s_res_box_font;
+static GFont s_res_box_font_small;
 static ActionBarLayer *action_layer;
 static Layer *clock_layer;
 static Layer *onoff_layer;
 static Layer *info_layer;
 
+// Horizontal inset for text inside the top and bottom boxes. On the Round 2 the boxes run
+// edge to edge, so the text is pulled in to keep it clear of the curved screen edge.
+#if defined(PBL_ROUND) && BIG_SCREEN
+#define BOX_TEXT_INSET 48
+#else
+#define BOX_TEXT_INSET 5
+#endif
+
+// Height of the AM/PM text box next to the clock digits
+
+#if defined(PBL_ROUND) && BIG_SCREEN
+  #define AMPM_HEIGHT 34
+  #define TIME_HEIGHT 84
+#else
+  #define AMPM_HEIGHT IF_BIG_ELSE(34, 22)
+  #define TIME_HEIGHT IF_BIG_ELSE(80, 36+10+16)
+#endif
+
 static void draw_box(Layer *layer, GContext *ctx, GColor border_color, GColor back_color, GColor text_color, char *text) {
   GRect bounds = layer_get_bounds(layer);
   graphics_context_set_fill_color(ctx, back_color);
-  graphics_fill_rect(ctx, layer_get_bounds(layer), PBL_IF_RECT_ELSE(8, 0), GCornersAll);
+  graphics_fill_rect(ctx, bounds, PBL_IF_RECT_ELSE(8, 0), GCornersAll);
   IF_3(graphics_context_set_stroke_width(ctx, 3)); 
   graphics_context_set_stroke_color(ctx, border_color);
-  graphics_draw_round_rect(ctx, layer_get_bounds(layer), PBL_IF_RECT_ELSE(8, 0));
+  graphics_draw_round_rect(ctx, bounds, PBL_IF_RECT_ELSE(8, 0));
   graphics_context_set_text_color(ctx, text_color);
-  GSize text_size = graphics_text_layout_get_content_size(text, s_res_gothic_18_bold, 
-                                                          GRect(5, 5, bounds.size.w-10, bounds.size.h-2), 
-                                                          GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
-  graphics_draw_text(ctx, text, s_res_gothic_18_bold, 
-                     GRect(5, ((bounds.size.h-text_size.h)/2)-4, bounds.size.w-10, text_size.h), 
+  
+  int16_t text_w = bounds.size.w - (2 * BOX_TEXT_INSET);
+  int16_t max_h = bounds.size.h - 2;
+  
+  // Measure the text with the normal font. If it is too tall for the box (e.g. the 3-line
+  // "SNOOZING / GET OUT OF BED / MONITORING" status), fall back to the smaller font.
+  GFont font = s_res_box_font;
+  GSize text_size = graphics_text_layout_get_content_size(text, font, GRect(0, 0, text_w, 500),
+                                                          GTextOverflowModeWordWrap, GTextAlignmentCenter);
+  if (text_size.h > max_h) {
+    font = s_res_box_font_small;
+    text_size = graphics_text_layout_get_content_size(text, font, GRect(0, 0, text_w, 500),
+                                                      GTextOverflowModeWordWrap, GTextAlignmentCenter);
+  }
+  if (text_size.h > max_h) text_size.h = max_h;
+  
+  graphics_draw_text(ctx, text, font, 
+                     GRect(BOX_TEXT_INSET, ((bounds.size.h-text_size.h)/2)-4, text_w, text_size.h), 
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
@@ -75,34 +112,43 @@ static void draw_onoff(Layer *layer, GContext *ctx) {
 static void draw_clock(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   
-
-#ifdef PBL_PLATFORM_EMERY
-  graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, GRect(bounds.size.w-ACTION_BAR_WIDTH-10, 0+6, ACTION_BAR_WIDTH+8+6+4, bounds.size.h+18), 0, GCornersAll);
-#elif defined (PBL_RECT)
+#ifdef PBL_RECT
   // Cover middle section of action bar to give more room for clock
   graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, GRect(bounds.size.w-ACTION_BAR_WIDTH, 0, ACTION_BAR_WIDTH, bounds.size.h), 0, GCornersAll);
+#if BIG_SCREEN
+  //graphics_fill_rect(ctx, GRect(bounds.size.w-ACTION_BAR_WIDTH-4, 6, ACTION_BAR_WIDTH+12, bounds.size.h), 0, GCornerNone);
+  graphics_fill_rect(ctx, GRect(bounds.size.w-ACTION_BAR_WIDTH, 0, ACTION_BAR_WIDTH, bounds.size.h), 0, GCornerNone);
+#else
+  graphics_fill_rect(ctx, GRect(bounds.size.w-ACTION_BAR_WIDTH, 0, ACTION_BAR_WIDTH, bounds.size.h), 0, GCornerNone);
+#endif
 #endif
   
   graphics_context_set_text_color(ctx, GColorWhite);
-
-#ifdef PBL_PLATFORM_EMERY
-  int ampm_w = 32-9, ampm_h = 26-6;
-#else
-  int ampm_w = 22, ampm_h = 18;
-#endif
   
   if (!clock_is_24h_style() && s_time_ampm[0] != '\0') {
-    // 12-hour mode: draw digits with large font, AM/PM with smaller font at right
-    graphics_draw_text(ctx, s_time_digits, s_res_clock_font, bounds,
-                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
-    GRect ampm_rect = GRect(bounds.size.w - ampm_w , (bounds.size.h - ampm_h) / 2, ampm_w, ampm_h);
-    graphics_draw_text(ctx, s_time_ampm, s_res_ampm_font, ampm_rect,
+    // 12-hour mode: draw the digits in the large font with AM/PM in a smaller font right
+    // after them, and centre the pair as one group so AM/PM never ends up under the action bar
+    GSize digits_size = graphics_text_layout_get_content_size(s_time_digits, s_res_clock_font, bounds,
+                                                              GTextOverflowModeWordWrap, GTextAlignmentLeft);
+    GSize ampm_size = graphics_text_layout_get_content_size(s_time_ampm, s_res_ampm_font, bounds,
+                                                            GTextOverflowModeWordWrap, GTextAlignmentLeft);
+    const int16_t gap = IF_BIG_ELSE(4,2);
+    int16_t x = (bounds.size.w - (digits_size.w + gap + ampm_size.w)) / 2;
+    if (x < 0) x = 0;
+
+    graphics_draw_text(ctx, s_time_digits, s_res_clock_font, GRect(x, (bounds.size.h - TIME_HEIGHT)/2, bounds.size.w - x, TIME_HEIGHT),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    
+    int16_t ampm_x = x + digits_size.w + gap;
+    graphics_draw_text(ctx, s_time_ampm, s_res_ampm_font, 
+                       GRect(ampm_x, (bounds.size.h - AMPM_HEIGHT) / 2, bounds.size.w - ampm_x, AMPM_HEIGHT),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   } else {
+    
+
     // 24-hour mode: draw full time string with large font
-    graphics_draw_text(ctx, s_time_digits, s_res_clock_font, bounds,
+
+    graphics_draw_text(ctx, s_time_digits, s_res_clock_font, GRect(0, (bounds.size.h - TIME_HEIGHT)/2, bounds.size.w, TIME_HEIGHT),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   }
 }
@@ -118,62 +164,74 @@ static void initialise_ui(void) {
   GRect bounds; 
   s_window = window_create_fullscreen(&root_layer, &bounds);
   
-  s_res_img_standby = gbitmap_create_with_resource(RESOURCE_ID_IMG_STANDBY);
-  s_res_img_settings = gbitmap_create_with_resource(RESOURCE_ID_IMG_SETTINGS);
-#ifdef PBL_PLATFORM_EMERY
-  s_res_clock_font = fonts_get_system_font(FONT_KEY_LECO_60_NUMBERS_AM_PM);
-  s_res_ampm_font  = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
-  s_res_gothic_18_bold = fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
+  
+#if BIG_SCREEN
+  // Pebble Time 2 and Pebble Round 2
+  // Custom Roboto Bold for the clock digits, scaled up from the Roboto Bold 49 used on the
+  // older watches (49 x 260/180 on the Round 2, 49 x 196/144 on the Time 2, rounded down)
+#ifdef PBL_ROUND
+  s_res_clock_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_ROBOTO_BOLD_70));
+  s_res_ampm_font  = fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
 #else
-  s_res_clock_font = fonts_get_system_font(FONT_KEY_ROBOTO_BOLD_SUBSET_49);
+  s_res_clock_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_ROBOTO_BOLD_64));
+  s_res_ampm_font  = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
+#endif
+  s_res_box_font = fonts_get_system_font(PBL_IF_RECT_ELSE(FONT_KEY_GOTHIC_28_BOLD, FONT_KEY_GOTHIC_24_BOLD));
+  s_res_box_font_small = fonts_get_system_font(PBL_IF_RECT_ELSE(FONT_KEY_GOTHIC_24_BOLD, FONT_KEY_GOTHIC_18_BOLD));
+#else
+  // Custom Roboto Bold 49 (same size as the built-in FONT_KEY_ROBOTO_BOLD_SUBSET_49, but bundled
+  // with the app so the clock looks the same whatever firmware the watch is running)
+  s_res_clock_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_ROBOTO_BOLD_49));
   s_res_ampm_font  = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
-  s_res_gothic_18_bold = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+  s_res_box_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+  s_res_box_font_small = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
 #endif
   
   // action_layer
   action_layer = action_bar_layer_create();
   action_bar_layer_add_to_window(action_layer, s_window);
   action_bar_layer_set_background_color(action_layer, GColorWhite);
-  action_bar_layer_set_icon(action_layer, BUTTON_ID_UP, s_res_img_standby);
-  action_bar_layer_set_icon(action_layer, BUTTON_ID_DOWN, s_res_img_settings);
-#ifdef PBL_PLATFORM_EMERY
-  layer_set_frame(action_bar_layer_get_layer(action_layer), GRect(bounds.size.w-29+3, 0, 29, bounds.size.h));
-  IF_3(layer_set_bounds(action_bar_layer_get_layer(action_layer), GRect(-6, 0, 31+6+4, bounds.size.h)));
-  // Put Action Bar underneath other layers on rectangular Pebbles
-  layer_add_child(root_layer, action_bar_layer_get_layer(action_layer));
-#elif defined (PBL_RECT)
-  layer_set_frame(action_bar_layer_get_layer(action_layer), GRect(bounds.size.w-20, 0, 20, bounds.size.h));
-  IF_3(layer_set_bounds(action_bar_layer_get_layer(action_layer), GRect(-6, 0, 31, bounds.size.h)));
-  // Put Action Bar underneath other layers on rectangular Pebbles
-  layer_add_child(root_layer, action_bar_layer_get_layer(action_layer));
-#endif
+  Layer *action_bar_root = action_bar_layer_get_layer(action_layer);
   
-  // clock_layer
-#ifdef PBL_PLATFORM_EMERY
-  clock_layer = layer_create_with_proc(root_layer, draw_clock,
-                                       GRect(0, (bounds.size.h/2)-39-9+10, bounds.size.w, 62+18-10));
-  // onoff_layer
-  onoff_layer = layer_create_with_proc(root_layer, draw_onoff,
-                                       GRect(2, 2, 169, 80));
-  // info_layer
-  info_layer = layer_create_with_proc(root_layer, draw_info,
-                                      GRect(2, 146, 169, 80));
+#ifdef PBL_RECT
+  // Narrow the action bar and put it underneath the other layers on rectangular Pebbles
+#if BIG_SCREEN
+  layer_set_frame(action_bar_root, GRect(bounds.size.w-ACTION_BAR_WIDTH, 0, ACTION_BAR_WIDTH+3, bounds.size.h));
+  layer_set_bounds(action_bar_root, GRect(-6, 0, ACTION_BAR_WIDTH+15, bounds.size.h));
 #else
-  clock_layer = layer_create_with_proc(root_layer, draw_clock,
-                                       GRect(0 - PBL_IF_RECT_ELSE(0, ACTION_BAR_WIDTH/2), (bounds.size.h/2)-32-PBL_IF_ROUND_ELSE(2, 0), bounds.size.w, 65));
-  // onoff_layer
-  onoff_layer = layer_create_with_proc(root_layer, draw_onoff,
-                                      PBL_IF_RECT_ELSE(GRect(2, (bounds.size.h/2)-82, 119, 56),
-                                                   GRect(-10, (bounds.size.h/2)-82, bounds.size.w+11, 56)));
-  // info_layer
-  info_layer = layer_create_with_proc(root_layer, draw_info,
-                                     PBL_IF_RECT_ELSE(GRect(2, (bounds.size.h/2)+26, 119, 56),
-                                                 GRect(-10, (bounds.size.h/2)+24, bounds.size.w+11, 56)));
+  layer_set_frame(action_bar_root, GRect(bounds.size.w-ACTION_BAR_WIDTH, 0, ACTION_BAR_WIDTH, bounds.size.h));
+  IF_3(layer_set_bounds(action_bar_root, GRect(-6, 0, ACTION_BAR_WIDTH+11, bounds.size.h)));
 #endif
+  layer_add_child(root_layer, action_bar_root);
   
-#ifdef PBL_ROUND
-  // Put Action Bar on top for Pebble Round
-  layer_add_child(root_layer, (Layer *)action_layer);
+  // Top and bottom boxes sit left of the action bar, clock in the middle
+  const int16_t box_h = IF_BIG_ELSE(80, 56);
+  const int16_t box_w = bounds.size.w - ACTION_BAR_WIDTH - 5;
+  
+  clock_layer = layer_create_with_proc(root_layer, draw_clock,
+                                      //  GRect(0, (bounds.size.h/2) - IF_BIG_ELSE(46, 32), 
+                                      //        bounds.size.w, IF_BIG_ELSE(86, 65)));
+                                        GRect(0, (bounds.size.h/2) - IF_BIG_ELSE(32, 26), 
+                                             bounds.size.w, IF_BIG_ELSE(32*2, (26*2))));
+  onoff_layer = layer_create_with_proc(root_layer, draw_onoff, GRect(2, 2, box_w, box_h));
+  info_layer = layer_create_with_proc(root_layer, draw_info, GRect(2, bounds.size.h - box_h - 2, box_w, box_h));
+#else
+  // Round: boxes run edge to edge (clipped by the circle), clock is centred left of the action bar
+  const int16_t box_h = IF_BIG_ELSE(78, 56);
+  const int16_t box_w = bounds.size.w + IF_BIG_ELSE(20, 11);
+  
+  clock_layer = layer_create_with_proc(root_layer, draw_clock,
+                                       GRect(0 - ACTION_BAR_WIDTH/2, (bounds.size.h/2) - IF_BIG_ELSE(48, 34), 
+                                             bounds.size.w, IF_BIG_ELSE(92, 65)));
+  onoff_layer = layer_create_with_proc(root_layer, draw_onoff,
+                                       GRect(-10, IF_BIG_ELSE(14, (bounds.size.h/2)-82), box_w, box_h));
+  info_layer = layer_create_with_proc(root_layer, draw_info,
+                                      GRect(-10, IF_BIG_ELSE(bounds.size.h - box_h - 14, (bounds.size.h/2)+24), 
+                                            box_w, box_h));
+  
+  // Put Action Bar on top for round Pebbles
+  layer_remove_from_parent(action_bar_root);
+  layer_add_child(root_layer, action_bar_root);
 #endif
 }
 
@@ -183,13 +241,42 @@ static void destroy_ui(void) {
   layer_destroy(clock_layer);
   layer_destroy(onoff_layer);
   layer_destroy(info_layer);
-  gbitmap_destroy(s_res_img_standby);
-  gbitmap_destroy(s_res_img_settings);
+  // Custom fonts have to be freed (system fonts don't)
+  fonts_unload_custom_font(s_res_clock_font);
+}
+
+// Loads the action bar icons (if not already loaded)
+static void load_icons(void) {
+  if (s_res_img_standby == NULL) s_res_img_standby = gbitmap_create_with_resource(RESOURCE_ID_IMG_STANDBY);
+  if (s_res_img_settings == NULL) s_res_img_settings = gbitmap_create_with_resource(RESOURCE_ID_IMG_SETTINGS);
+  if (s_res_img_snooze == NULL) s_res_img_snooze = gbitmap_create_with_resource(RESOURCE_ID_IMG_SNOOZE);
+}
+
+// Frees the action bar icons (the action bar must not be showing them when this is called)
+static void unload_icons(void) {
+  if (s_res_img_standby != NULL) { gbitmap_destroy(s_res_img_standby); s_res_img_standby = NULL; }
+  if (s_res_img_settings != NULL) { gbitmap_destroy(s_res_img_settings); s_res_img_settings = NULL; }
+  if (s_res_img_snooze != NULL) { gbitmap_destroy(s_res_img_snooze); s_res_img_snooze = NULL; }
+}
+
+static void set_bar_icon(ButtonId button, GBitmap *icon) {
+  if (icon != NULL)
+    action_bar_layer_set_icon(action_layer, button, icon);
+  else
+    action_bar_layer_clear_icon(action_layer, button);
+}
+
+// Shows the snooze icons while an alarm is active (ringing, snoozing or monitoring),
+// otherwise the standby and settings icons
+static void refresh_icons(void) {
+  bool active = (s_onoff_mode == MODE_ACTIVE);
+  set_bar_icon(BUTTON_ID_UP, active ? s_res_img_snooze : s_res_img_standby);
+  set_bar_icon(BUTTON_ID_DOWN, active ? s_res_img_snooze : s_res_img_settings);
 }
 
 static void handle_window_unload(Window* window) {
   destroy_ui();
-  gbitmap_destroy(s_res_img_snooze);
+  unload_icons();
 }
 
 // Handles timer event when app has been idle for X minutes and auto-closes app
@@ -226,11 +313,23 @@ static void restart_autoclose_timer() {
 }
 
 static void handle_window_appear(Window* window) {
+#ifdef PBL_PLATFORM_APLITE
+  // Reload the icons that were freed while another window was covering this one
+  load_icons();
+  refresh_icons();
+#endif
   restart_autoclose_timer();
 }
 
 static void handle_window_disappear(Window* window) {
   stop_autoclose_timer();
+#ifdef PBL_PLATFORM_APLITE
+  // Aplite is very short of memory, so free the action bar icons while another window
+  // (Settings, alarm picker, etc.) is covering this one. Clear them from the action bar first.
+  action_bar_layer_clear_icon(action_layer, BUTTON_ID_UP);
+  action_bar_layer_clear_icon(action_layer, BUTTON_ID_DOWN);
+  unload_icons();
+#endif
 }
 
 static void set_onoff_text(const char *onoff_text) {
@@ -296,14 +395,13 @@ void show_alarm_ui(bool on, bool goob) {
       set_onoff_text("GET UP!");
     else
       set_onoff_text("WAKEY! WAKEY!");
-    update_info("Click to snooze\n2 clicks to stop ");
-    action_bar_layer_set_icon(action_layer, BUTTON_ID_UP, s_res_img_snooze);
-    action_bar_layer_set_icon(action_layer, BUTTON_ID_DOWN, s_res_img_snooze);
+    char info[40];
+    snprintf(info, sizeof(info), "Click to snooze\n%s", STOP_HINT());
+    update_info(info);
   } else {
     update_onoff(s_alarms_on);
-    action_bar_layer_set_icon(action_layer, BUTTON_ID_UP, s_res_img_standby);
-    action_bar_layer_set_icon(action_layer, BUTTON_ID_DOWN, s_res_img_settings);
   }
+  refresh_icons();
 }
 
 // Update the main window to show snoozing, smart alarm monitoring, or Get Out Of Bed alarm monitoring
@@ -331,17 +429,23 @@ void show_status(time_t alarm_time, status_enum status) {
   gen_time_str(t->tm_hour, t->tm_min, time_str, sizeof(time_str));
   
   char info[40];
-  snprintf(info, sizeof(info), "%s: %s\n2 clicks to stop", (status == S_Snoozing ? "Until" : "Alarm"), time_str);
+  snprintf(info, sizeof(info), "%s: %s\n%s", (status == S_Snoozing ? "Until" : "Alarm"), time_str, STOP_HINT());
   update_info(info);
   
-  action_bar_layer_set_icon(action_layer, BUTTON_ID_UP, s_res_img_snooze);
-  action_bar_layer_set_icon(action_layer, BUTTON_ID_DOWN, s_res_img_snooze);
+  refresh_icons();
+}
+
+// Tells the main window whether the Konami code is needed to stop an alarm,
+// so it can show the right instructions
+void update_konami_mode(bool konami_on) {
+  s_konami_on = konami_on;
 }
 
 // Show the main application window
 void show_mainwin(uint8_t autoclose_timeout) {
   initialise_ui();
-  s_res_img_snooze = gbitmap_create_with_resource(RESOURCE_ID_IMG_SNOOZE);
+  load_icons();
+  refresh_icons();
   s_autoclose_timeout = autoclose_timeout;
   window_set_window_handlers(s_window, (WindowHandlers) {
     .unload = handle_window_unload,

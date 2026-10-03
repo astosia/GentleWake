@@ -14,26 +14,48 @@ static Window *s_window;
 static GBitmap *s_res_img_upaction;
 static GBitmap *s_res_img_okaction;
 static GBitmap *s_res_img_downaction;
-static GFont s_res_gothic_24;
-static GFont s_res_gothic_28;
+static GFont s_res_title_font;
+static GFont s_res_date_font;
+static GFont s_res_note_font;
 static ActionBarLayer *s_actionbarlayer;
 static Layer *s_info_layer;
 
+// Layout, relative to the vertical centre of the screen. On the big screens the date is shown
+// on two lines ("Wed" / "Oct 07") so it can use a much larger font.
+#if BIG_SCREEN
+#define DATE_FORMAT "%a\n%b %d"
+#define TITLE_Y (-92)
+#define TITLE_H 36
+#define DATE_Y (-54)
+#define DATE_H 90
+#define NOTE_Y 38
+#define NOTE_H 36
+#else
+#define DATE_FORMAT "%a, %b %d"
+#define TITLE_Y (-55)
+#define TITLE_H 32
+#define DATE_Y (-18)
+#define DATE_H 32
+#define NOTE_Y 18
+#define NOTE_H 32
+#endif
+
 static void draw_info(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer); 
+  int16_t cy = bounds.size.h / 2;
   
   graphics_context_set_text_color(ctx, GColorWhite);
   // Draw title
-  graphics_draw_text(ctx, "Skip Until", s_res_gothic_24, GRect(2, (bounds.size.h/2)-55, bounds.size.w-4, 32), 
+  graphics_draw_text(ctx, "Skip Until", s_res_title_font, GRect(2, cy+TITLE_Y, bounds.size.w-4, TITLE_H), 
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   
   // Draw date
-  graphics_draw_text(ctx, s_date, s_res_gothic_28, GRect(2, (bounds.size.h/2)-18, bounds.size.w-4, 32), 
+  graphics_draw_text(ctx, s_date, s_res_date_font, GRect(2, cy+DATE_Y, bounds.size.w-4, DATE_H), 
                      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   
   // Draw "No Skipping"
   if (s_show_noskip)
-    graphics_draw_text(ctx, "(No skipping)", s_res_gothic_24, GRect(7, (bounds.size.h/2)+18, bounds.size.w-14, 32), 
+    graphics_draw_text(ctx, "(No skipping)", s_res_note_font, GRect(7, cy+NOTE_Y, bounds.size.w-14, NOTE_H), 
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
@@ -47,8 +69,16 @@ static void initialise_ui(void) {
   s_res_img_upaction = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_UPACTION2);
   s_res_img_okaction = gbitmap_create_with_resource(RESOURCE_ID_IMG_OKACTION);
   s_res_img_downaction = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_DOWNACTION2);
-  s_res_gothic_24 = fonts_get_system_font(FONT_KEY_GOTHIC_24);
-  s_res_gothic_28 = fonts_get_system_font(FONT_KEY_GOTHIC_28);
+#if BIG_SCREEN
+  s_res_title_font = fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
+  // Custom Roboto Bold 36 for the date (bundled font, freed in destroy_ui)
+  s_res_date_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_ROBOTO_BOLD_36));
+  s_res_note_font = fonts_get_system_font(FONT_KEY_GOTHIC_28);
+#else
+  s_res_title_font = fonts_get_system_font(FONT_KEY_GOTHIC_24);
+  s_res_date_font = fonts_get_system_font(FONT_KEY_GOTHIC_28);
+  s_res_note_font = fonts_get_system_font(FONT_KEY_GOTHIC_24);
+#endif
   // s_actionbarlayer
   s_actionbarlayer = actionbar_create(s_window, root_layer, &bounds, s_res_img_upaction, s_res_img_okaction, s_res_img_downaction);
   
@@ -65,6 +95,11 @@ static void destroy_ui(void) {
   gbitmap_destroy(s_res_img_okaction);
   gbitmap_destroy(s_res_img_downaction);
   
+#if BIG_SCREEN
+  // Custom fonts have to be freed (system fonts don't)
+  fonts_unload_custom_font(s_res_date_font);
+#endif
+  
   free(s_date);
 }
 
@@ -79,7 +114,7 @@ static time_t get_today() {
 static void update_date_display() {
   time_t skip_utc = s_skip_until - get_UTC_offset(NULL);
   struct tm *t = localtime(&skip_utc);
-  strftime(s_date, LEN_DATE, "%a, %b %d", t);
+  strftime(s_date, LEN_DATE, DATE_FORMAT, t);
   s_show_noskip = (s_skip_until <= get_today());
   layer_mark_dirty(s_info_layer);
 }
@@ -118,10 +153,9 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static void click_config_provider(void *context) {
+  // (Repeating subscriptions also handle single presses, so Up/Down are only subscribed once)
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
-  window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
   window_single_repeating_click_subscribe(BUTTON_ID_UP, 50, up_click_handler);
-  window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
   window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 50, down_click_handler);
 }
 

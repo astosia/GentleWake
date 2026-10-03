@@ -58,7 +58,7 @@ void unload_periodset(void) {
 
 #include "commonwin.h"
 
-#define LEN_PERIOD 3
+#define LEN_PERIOD 4
 
 static char s_title[30];
 static uint8_t s_minutes = 0;
@@ -67,9 +67,9 @@ static uint8_t s_max_minutes = 60;
 static char s_minute_str[LEN_PERIOD];
 
 static Window *s_window;
-static GFont s_res_bitham_30_black;
-static GFont s_res_gothic_28_bold;
-static GFont s_res_gothic_24_bold;
+static GFont s_res_number_font;
+static GFont s_res_units_font;
+static GFont s_res_title_font;
 static GBitmap *s_res_img_upaction;
 static GBitmap *s_res_img_okaction;
 static GBitmap *s_res_img_downaction;
@@ -78,21 +78,29 @@ static Layer *s_period_layer;
 
 static void draw_period(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer); 
+  // Centre of the area left of the action bar (round watches centre on the whole screen)
+  int16_t cx = (bounds.size.w-PBL_IF_RECT_ELSE(ACTION_BAR_WIDTH,0))/2;
+  int16_t cy = bounds.size.h/2;
   
   graphics_context_set_text_color(ctx, GColorWhite);
   // Draw title
-  graphics_draw_text(ctx, s_title, s_res_gothic_24_bold, 
-                     GRect(2+PBL_IF_ROUND_ELSE(ACTION_BAR_WIDTH/2, 0), (bounds.size.h/2)-70, bounds.size.w-ACTION_BAR_WIDTH-4, 49), 
+#if defined(PBL_ROUND) && BIG_SCREEN
+  GRect title_rect = GRect(40, cy-90, bounds.size.w-80, 62);
+#else
+  GRect title_rect = GRect(2+PBL_IF_ROUND_ELSE(ACTION_BAR_WIDTH/2, 0), cy-IF_BIG_ELSE(90, 70), 
+                           bounds.size.w-ACTION_BAR_WIDTH-4, IF_BIG_ELSE(62, 49));
+#endif
+  graphics_draw_text(ctx, s_title, s_res_title_font, title_rect,
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   
   // Draw period
-  graphics_draw_text(ctx, s_minute_str, s_res_bitham_30_black, 
-                     GRect(((bounds.size.w-PBL_IF_RECT_ELSE(ACTION_BAR_WIDTH,0))/2)-30, (bounds.size.h/2)-19, 60, 36), 
+  graphics_draw_text(ctx, s_minute_str, s_res_number_font, 
+                     IF_BIG_ELSE(GRect(cx-40, cy-26, 80, 50), GRect(cx-30, cy-19, 60, 36)), 
                      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   
   // Draw units
-  graphics_draw_text(ctx, "Minutes", s_res_gothic_28_bold, 
-                     GRect(((bounds.size.w-PBL_IF_RECT_ELSE(ACTION_BAR_WIDTH,0))/2)-40, (bounds.size.h/2)+15, 80, 31), 
+  graphics_draw_text(ctx, "Minutes", s_res_units_font, 
+                     IF_BIG_ELSE(GRect(cx-50, cy+26, 100, 34), GRect(cx-40, cy+15, 80, 31)), 
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
@@ -102,9 +110,9 @@ static void initialise_ui(void) {
   Layer *root_layer = NULL;
   s_window = window_create_fullscreen(&root_layer, &bounds);
   
-  s_res_bitham_30_black = fonts_get_system_font(FONT_KEY_BITHAM_30_BLACK);
-  s_res_gothic_28_bold = fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
-  s_res_gothic_24_bold = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
+  s_res_number_font = fonts_get_system_font(IF_BIG_ELSE(FONT_KEY_LECO_42_NUMBERS, FONT_KEY_BITHAM_30_BLACK));
+  s_res_units_font = fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
+  s_res_title_font = fonts_get_system_font(IF_BIG_ELSE(FONT_KEY_GOTHIC_28_BOLD, FONT_KEY_GOTHIC_24_BOLD));
   s_res_img_upaction = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_UPACTION2);
   s_res_img_okaction = gbitmap_create_with_resource(RESOURCE_ID_IMG_OKACTION);
   s_res_img_downaction = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_DOWNACTION2);
@@ -151,10 +159,9 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static void click_config_provider(void *context) {
+  // (Repeating subscriptions also handle single presses, so Up/Down are only subscribed once)
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
-  window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
   window_single_repeating_click_subscribe(BUTTON_ID_UP, 50, up_click_handler);
-  window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
   window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 50, down_click_handler);
 }
 

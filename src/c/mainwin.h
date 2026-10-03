@@ -1,3 +1,4 @@
+#pragma once
 #include <pebble.h>
 
 typedef enum status_enum {
@@ -14,5 +15,6 @@ void init_click_events(ClickConfigProvider click_config_provider);
 void update_onoff(bool on);
 void update_info(char* text);
 void update_autoclose_timeout(uint8_t timeout);
+void update_konami_mode(bool konami_on);
 void show_alarm_ui(bool on, bool goob);
 void show_status(time_t alarm_time, status_enum status);

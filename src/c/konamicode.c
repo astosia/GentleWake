@@ -10,8 +10,8 @@ static Window *s_window;
 static GBitmap *s_res_img_nextaction;
 static GBitmap *s_res_image_upaction2;
 static GBitmap *s_res_image_downaction2;
-static GFont s_res_gothic_24;
-static GFont s_res_gothic_14;
+static GFont s_res_title_font;
+static GFont s_res_instr_font;
 static ActionBarLayer *s_actionbarlayer;
 static TextLayer *s_textlayer_backbutton;
 static Layer *s_layer_code;
@@ -105,28 +105,42 @@ static void cancel_close_timer() {
   }
 }
 
+// Layout of the code panel (all positions are relative to the panel)
+#define CODE_ICON_SIZE 18
+#define CODE_ICON_SPACING IF_BIG_ELSE(30, 23)
+#define CODE_TITLE_HEIGHT IF_BIG_ELSE(62, 49)
+#define CODE_INSTR_Y IF_BIG_ELSE(56, 44)
+#define CODE_INSTR_HEIGHT IF_BIG_ELSE(64, 43)
+
 // Draw the random Konami Code with instructions
 static void draw_code(Layer *layer, GContext *ctx) {
-  // Draw border
+  GRect bounds = layer_get_bounds(layer);
+  
+#if !(defined(PBL_ROUND) && BIG_SCREEN)
+  // Draw border (skipped on the Round 2, where the circle would clip its corners)
   graphics_context_set_stroke_color(ctx, GColorWhite);
-  GRect layer_rect = layer_get_bounds(layer);
-  graphics_draw_round_rect(ctx, GRect(0, 0, layer_rect.size.w, layer_rect.size.h), 8);
+  graphics_draw_round_rect(ctx, GRect(0, 0, bounds.size.w, bounds.size.h), 8);
+#endif
   
   graphics_context_set_text_color(ctx, GColorWhite);
   
   // Draw title
-  graphics_draw_text(ctx, "Random Konami Code", s_res_gothic_24, GRect(1, -5, 119, 49), 
+  graphics_draw_text(ctx, "Random Konami Code", s_res_title_font, GRect(1, -5, bounds.size.w-2, CODE_TITLE_HEIGHT), 
                      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   
   // Draw instructions
-  graphics_draw_text(ctx, "Press the buttons in the order below to stop the alarm", s_res_gothic_14, GRect(3, 44, 114, 43), 
+  graphics_draw_text(ctx, "Press the buttons in the order below to stop the alarm", s_res_instr_font, 
+                     GRect(3, CODE_INSTR_Y, bounds.size.w-6, CODE_INSTR_HEIGHT), 
                      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   
-  // Draw codes
+  // Draw codes, centred as a row near the bottom of the panel
+  int16_t row_w = (4 * CODE_ICON_SPACING) + CODE_ICON_SIZE;
+  int16_t x0 = (bounds.size.w - row_w) / 2;
+  int16_t y = IF_BIG_ELSE(bounds.size.h - 32, 91);
   for (uint8_t i = 0; i < 5; i++) {
     GBitmap *img = get_code_img(s_konami_sequence[i], (i < s_current_code), ctx);
     if (img != NULL) {
-      graphics_draw_bitmap_in_rect(ctx, img, GRect(5 + (i * 23), 91, 18, 18));
+      graphics_draw_bitmap_in_rect(ctx, img, GRect(x0 + (i * CODE_ICON_SPACING), y, CODE_ICON_SIZE, CODE_ICON_SIZE));
       gbitmap_destroy(img);
     }
   }
@@ -141,21 +155,29 @@ static void initialise_ui(void) {
   s_res_img_nextaction = gbitmap_create_with_resource(RESOURCE_ID_IMG_NEXTACTION);
   s_res_image_upaction2 = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_UPACTION2);
   s_res_image_downaction2 = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_DOWNACTION2);
-  s_res_gothic_24 = fonts_get_system_font(FONT_KEY_GOTHIC_24);
-  s_res_gothic_14 = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  s_res_title_font = fonts_get_system_font(IF_BIG_ELSE(FONT_KEY_GOTHIC_28, FONT_KEY_GOTHIC_24));
+  s_res_instr_font = fonts_get_system_font(IF_BIG_ELSE(FONT_KEY_GOTHIC_18, FONT_KEY_GOTHIC_14));
   
   // s_actionbarlayer
   s_actionbarlayer = actionbar_create(s_window, root_layer, &bounds, s_res_image_upaction2, s_res_img_nextaction, s_res_image_downaction2);
   
   // s_textlayer_backbutton
-  s_textlayer_backbutton = text_layer_create(GRect(1, 4, bounds.size.w-PBL_IF_RECT_ELSE(ACTION_BAR_WIDTH+1, 0), 45));
+#ifdef PBL_RECT
+  GRect hint_rect = GRect(1, 4, bounds.size.w-ACTION_BAR_WIDTH-1, IF_BIG_ELSE(56, 45));
+#else
+  GRect hint_rect = IF_BIG_ELSE(GRect(0, 14, bounds.size.w, 64), GRect(1, 4, bounds.size.w, 45));
+#endif
+  s_textlayer_backbutton = text_layer_create(hint_rect);
   text_layer_set_background_color(s_textlayer_backbutton, GColorClear);
   text_layer_set_text_color(s_textlayer_backbutton, GColorWhite);
+#if BIG_SCREEN
+  text_layer_set_font(s_textlayer_backbutton, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+#endif
   text_layer_set_text(s_textlayer_backbutton, "<- HOLD Back button to exit without stopping alarm");
-  layer_add_child(root_layer, (Layer *)s_textlayer_backbutton);
+  layer_add_child(root_layer, text_layer_get_layer(s_textlayer_backbutton));
 #ifndef PBL_RECT
   text_layer_set_text_alignment(s_textlayer_backbutton, GTextAlignmentCenter);
-  text_layer_enable_screen_text_flow_and_paging(s_textlayer_backbutton, 1);
+  text_layer_enable_screen_text_flow_and_paging(s_textlayer_backbutton, IF_BIG_ELSE(6, 1));
 #endif
   
   // Setup random konami code sequence
@@ -163,8 +185,13 @@ static void initialise_ui(void) {
   gen_konami_sequence();
   
   // s_layer_code
-  s_layer_code = layer_create_with_proc(root_layer, draw_code, 
-                                       GRect(2+PBL_IF_ROUND_ELSE(25, 0), 50, 120, bounds.size.h-56));
+#ifdef PBL_RECT
+  int16_t code_top = IF_BIG_ELSE(62, 50);
+  GRect code_rect = GRect(2, code_top, bounds.size.w-ACTION_BAR_WIDTH-4, bounds.size.h-code_top-6);
+#else
+  GRect code_rect = IF_BIG_ELSE(GRect(30, 80, 170, 152), GRect(27, 50, 120, bounds.size.h-56));
+#endif
+  s_layer_code = layer_create_with_proc(root_layer, draw_code, code_rect);
 }
 
 // Free memory from all the UI elements
@@ -247,4 +274,3 @@ void hide_konamicode(void) {
   cancel_close_timer();
   window_stack_remove(s_window, true);
 }
-

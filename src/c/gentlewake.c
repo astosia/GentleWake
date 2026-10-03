@@ -58,7 +58,7 @@
 
 static bool s_alarms_on = true;
 static alarm s_alarms[7];
-static char s_info[45];
+static char s_info[48];
 static WakeupId s_wakeup_id;
 static WakeupId s_wakeup_goob_id;
 static time_t s_snooze_until;
@@ -248,7 +248,7 @@ static void gen_info_str(int8_t next_alarm) {
   
   char day_str[9];
   char time_str[8];
-  char timeto_str[20];
+  char timeto_str[22];
   
   if (next_alarm == NEXT_ALARM_NONE) {
     strncpy(s_info, "NO ALARMS SET", sizeof(s_info));
@@ -346,7 +346,7 @@ static void show_wakeup_error(WakeupId result, time_t wakeup_time, char *wakeup_
       dayname(wt->tm_wday, daystr, sizeof(daystr));
     gen_time_str(wt->tm_hour, wt->tm_min, timestr, sizeof(timestr));
     snprintf(msg, sizeof(msg), 
-             "Unable to set %s alarm due to another alarm on %s at %s +/-5 minutes in another app. Please either change the alarm time here or the other app.", 
+             "Unable to set %s alarm. Another app has an alarm on %s at %s (+/-5 min). Please change the time here or in the other app.", 
              wakeup_type, daystr, timestr);
   } else {
     // Something else went wrong
@@ -714,6 +714,9 @@ static void vibe_alarm() {
 // Callback function to indicate when the settings have been closed
 // so that various items can be updated
 static void settings_update() {
+  // Tell the main window whether stopping an alarm needs the Konami code
+  update_konami_mode(s_settings.konamic_code_on);
+  
   if (s_loaded) {
     // Reset the last reset day in case alarms were changed
     set_lastresetday(0);
@@ -1197,6 +1200,9 @@ static void init(void) {
   s_loaded = true;
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// App glances (the summary shown in the launcher) don't exist on aplite's firmware,
+// so this is left out of the aplite build to save memory
 static void update_app_glance(AppGlanceReloadSession *session, size_t limit, void *context) {
   if (limit < 3) return;
   
@@ -1304,10 +1310,14 @@ static void update_app_glance(AppGlanceReloadSession *session, size_t limit, voi
   }
 }
 
+#endif
+
 static void deinit(void) {
   
   if (s_accel_service_sub) accel_data_service_unsubscribe();
+#ifndef PBL_PLATFORM_APLITE
   app_glance_reload(update_app_glance, NULL);
+#endif
   
   hide_mainwin();
 }

@@ -60,15 +60,14 @@ static void initialise_ui(void) {
   GRect bounds;
   Layer *root_layer = NULL;
   s_window = window_create_fullscreen(&root_layer, &bounds);
-  #ifndef PBL_PLATFORM_EMERY
-    s_header_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
-  #else 
-    s_header_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
-  #endif
+  s_header_font = fonts_get_system_font(IF_BIG_ELSE(FONT_KEY_GOTHIC_24_BOLD, FONT_KEY_GOTHIC_14_BOLD));
   
   // settings_layer
   settings_layer = menu_layer_create(bounds);
-  menu_layer_set_click_config_onto_window(settings_layer, s_window);
+  // Note: the menu's own click handling is deliberately not attached to the window
+  // (no menu_layer_set_click_config_onto_window). All the menu buttons are handled by
+  // click_config_provider() below, and attaching both makes each press move two rows
+  // on newer firmware.
   IF_COLOR(menu_layer_set_normal_colors(settings_layer, GColorBlack, GColorWhite)); 
   IF_COLOR(menu_layer_set_highlight_colors(settings_layer, GColorBlueMoon, GColorWhite));
   layer_add_child(root_layer, (Layer *)settings_layer);
@@ -128,11 +127,7 @@ static int16_t menu_get_header_height_callback(MenuLayer *menu_layer, uint16_t s
         case MAIN_MENU_ALARM_SECTION:
           return 0;
         default:
-          #ifdef PBL_PLATFORM_EMERY
-            return 34;
-          #else
-            return MENU_CELL_BASIC_HEADER_HEIGHT;
-          #endif
+          return IF_BIG_ELSE(34, MENU_CELL_BASIC_HEADER_HEIGHT);
       }
     case ML_Alarms:
       return 0;
@@ -198,7 +193,7 @@ static bool is_alarms_mixed() {
 
 // Draw menu items
 static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuIndex *cell_index, void *data) {
-  char alarm_summary[15];
+  char alarm_summary[16];
   bool is_mixed = false;
   bool all_off = true;
   int first_day = -1;
@@ -208,8 +203,8 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
   char alarm_str[8];
   char snooze_str[15];
   char monitor_str[15];
-  char dst_check_hour_str[6];
-  char autoclose_str[17];
+  char dst_check_hour_str[8];
+  char autoclose_str[18];
   char goob_str[27];
   
   char daystr[10];
@@ -725,21 +720,27 @@ static void longselect_click_handler(ClickRecognizerRef recognizer, void *contex
   menu_longselect_callback(settings_layer, &idx, NULL);
 }
 
+// Aplite scrolls the menu without animation, as the scroll animation needs memory it doesn't have
+#ifdef PBL_PLATFORM_APLITE
+#define SCROLL_ANIMATED false
+#else
+#define SCROLL_ANIMATED true
+#endif
+
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
-  menu_layer_set_selected_next(settings_layer, true, MenuRowAlignCenter, true);
+  menu_layer_set_selected_next(settings_layer, true, MenuRowAlignCenter, SCROLL_ANIMATED);
 }
 
 static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
-  menu_layer_set_selected_next(settings_layer, false, MenuRowAlignCenter, true);
+  menu_layer_set_selected_next(settings_layer, false, MenuRowAlignCenter, SCROLL_ANIMATED);
 }
 
 static void click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_BACK, back_click_handler);
-  // Have to reimplement the menu up/down/select clicks in order to override window back click as well
+  // Have to reimplement the menu up/down/select clicks in order to override window back click as well.
+  // The repeating subscriptions also handle single presses, so Up/Down are only subscribed once.
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
   window_long_click_subscribe(BUTTON_ID_SELECT, 1000, longselect_click_handler, NULL);
-  window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
-  window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
   window_single_repeating_click_subscribe(BUTTON_ID_UP, 250, up_click_handler);
   window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 250, down_click_handler);
 }

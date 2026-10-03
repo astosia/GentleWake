@@ -1,7 +1,7 @@
 #pragma once
 #include <pebble.h>
   
-#define VERSION "4.0"
+#define VERSION "4.1"
   
 #ifdef PBL_COLOR
 #define IF_COLOR(statement)   (statement)
@@ -25,9 +25,26 @@
 #define IF_2(sdk2)
 #endif
 
+// Screen size class. "Big" screens are the Pebble Time 2 (emery, 200x228) and the
+// Pebble Round 2 (gabbro, 260x260). Everything else is 144x168 or 180x180.
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO) || \
+    (defined(PBL_DISPLAY_WIDTH) && PBL_DISPLAY_WIDTH >= 200)
+#define BIG_SCREEN 1
+#define IF_BIG_ELSE(big, small) (big)
+#else
+#define BIG_SCREEN 0
+#define IF_BIG_ELSE(big, small) (small)
+#endif
+
+// Width of the (narrowed) action bar on rectangular watches. Every window uses this
+// value so the action bar stays the same width when moving between screens.
 #ifdef PBL_RECT
 #undef ACTION_BAR_WIDTH
+#if BIG_SCREEN
+#define ACTION_BAR_WIDTH 26
+#else
 #define ACTION_BAR_WIDTH 20
+#endif
 #endif
 
 typedef void (*SettingsClosedCallBack)();
