@@ -14,7 +14,7 @@
 
 #define NUM_MAIN_MENU_ALARM_ITEMS 1
 #if ALARM_SOUND
-#define NUM_MAIN_MENU_MISC_ITEMS 7
+#define NUM_MAIN_MENU_MISC_ITEMS 9
 #else
 #define NUM_MAIN_MENU_MISC_ITEMS 6
 #endif
@@ -38,6 +38,8 @@
 #define MAIN_MENU_VIBEPATTERN_ITEM 4
 #define MAIN_MENU_AUTOCLOSE_ITEM 5
 #define MAIN_MENU_ALARMSOUND_ITEM 6
+#define MAIN_MENU_SOUNDONLY_ITEM 7
+#define MAIN_MENU_STARTVOLUME_ITEM 8
 
 #define MAIN_MENU_SMARTALARM_ITEM 0
 #define MAIN_MENU_SMARTPERIOD_ITEM 1
@@ -197,27 +199,77 @@ static bool is_alarms_mixed() {
 }
 
 // Draw menu items
+#if SYSTEM_VIBES
+// Samples of the Gentle Wake patterns: one buzz each of the pattern's short, medium and long
+// lengths, so you can feel how it builds up over the alarm (from vibe_segments_orig and
+// vibe_segments_strong in gentlewake.c)
+static const uint32_t s_gentle_sample[] = {150, 700, 300, 700, 600};
+static const uint32_t s_nsg_sample[] = {300, 400, 450, 400, 600};
+
+// Plays a short sample of a vibration pattern (the first few seconds, for system patterns)
+static void preview_vibe_pattern(uint8_t pattern) {
+  static uint32_t s_preview[40];
+  VibePattern pat;
+  
+  vibes_cancel();
+  switch (pattern) {
+    case VP_Gentle:
+    case VP_NSG2Snooze:   // NSG After 2 Snoozes starts out with the gentle pattern
+      pat.durations = s_gentle_sample;
+      pat.num_segments = ARRAY_LENGTH(s_gentle_sample);
+      break;
+    case VP_NSG:
+      pat.durations = s_nsg_sample;
+      pat.num_segments = ARRAY_LENGTH(s_nsg_sample);
+      break;
+    default:
+      if (pattern >= VP_COUNT) return;
+      pat.durations = s_preview;
+      pat.num_segments = sys_vibe_get(pattern - VP_SysFirst, s_preview, ARRAY_LENGTH(s_preview), 3000, NULL, NULL);
+      break;
+  }
+  if (pat.num_segments > 0) vibes_enqueue_custom_pattern(pat);
+}
+#endif
+
 #if ALARM_SOUND
+#define PREVIEW_MS 3000   // length of the sound sample played when changing a sound setting
+
 // Name shown in the menu for each alarm sound option
 static const char* alarm_sound_name(uint8_t sound) {
   switch (sound) {
-    case AS_VibeChime: return "Vibrate + Chime";
-    case AS_VibeBeeps: return "Vibrate + Beeps";
-    case AS_ChimeOnly: return "Chime only";
-    case AS_BeepsOnly: return "Beeps only";
-    default:           return "Vibrate only";
+    case AS_Off:   return "Off (vibrate only)";
+    case AS_Chime: return "Chime";
+    case AS_Beeps: return "Beeps";
+    default:       return (sound < AS_Count) ? sys_tone_name(sound - AS_SysFirst) : "???";
   }
 }
 
-// Plays a short sample of the chosen alarm sound (nothing for vibrate only, or if the speaker is muted)
-static void preview_alarm_sound(uint8_t sound) {
-  // Only stop the speaker if it is playing (stopping it when idle can make it pop)
+static uint8_t start_volume(void) {
+  return s_settings->sound_start_volume ? s_settings->sound_start_volume : DEFAULT_START_VOLUME;
+}
+
+// Stops the speaker if it is playing (stopping it when idle can make it pop)
+static void stop_preview(void) {
   if (speaker_get_status() != SpeakerStatusIdle) speaker_stop();
-  if (sound == AS_VibeOnly || speaker_is_muted()) return;
-  if (sound == AS_VibeChime || sound == AS_ChimeOnly)
-    speaker_play_tone(659, 300, 50, SpeakerWaveformSine);     // E5, soft
-  else
-    speaker_play_tone(1047, 200, 50, SpeakerWaveformSquare);  // C6 beep
+}
+
+// Plays a short sample of the chosen alarm sound at the starting volume
+// (nothing if the sound is off or the speaker is muted)
+static void preview_alarm_sound(void) {
+  stop_preview();
+  uint8_t sound = s_settings->alarm_sound;
+  if (sound == AS_Off || sound >= AS_Count || speaker_is_muted()) return;
+  
+  if (sound == AS_Chime) {
+    speaker_play_tone(659, 300, start_volume(), SpeakerWaveformSine);     // E5, soft
+  } else if (sound == AS_Beeps) {
+    speaker_play_tone(1047, 200, start_volume(), SpeakerWaveformSquare);  // C6 beep
+  } else {
+    const SpeakerNote *notes;
+    uint16_t count = sys_tone_get(sound - AS_SysFirst, &notes, PREVIEW_MS);
+    speaker_play_notes(notes, count, start_volume());
+  }
 }
 #endif
 
@@ -335,6 +387,13 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
                   menu_cell_basic_draw(ctx, cell_layer, "Vibration Pattern", "NSG After 2 Snoozes", NULL);
                   break;
                 default:
+#if SYSTEM_VIBES
+                  if (s_settings->vibe_pattern < VP_COUNT) {
+                    menu_cell_basic_draw(ctx, cell_layer, "Vibration Pattern", 
+                                         sys_vibe_name(s_settings->vibe_pattern - VP_SysFirst), NULL);
+                    break;
+                  }
+#endif
                   menu_cell_basic_draw(ctx, cell_layer, "Vibration Pattern", "???", NULL);
                   break;
               }
@@ -359,6 +418,18 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
               // Show the alarm sound setting
               menu_cell_basic_draw(ctx, cell_layer, "Alarm Sound", alarm_sound_name(s_settings->alarm_sound), NULL);
               break;
+            case MAIN_MENU_SOUNDONLY_ITEM:
+              // Whether to vibrate as well as playing the sound
+              menu_cell_basic_draw(ctx, cell_layer, "Vibrate With Sound", 
+                                   s_settings->sound_only ? "No (sound only)" : "Yes", NULL);
+              break;
+            case MAIN_MENU_STARTVOLUME_ITEM: {
+              // Volume the alarm sound starts at (it rises to 100%)
+              char volume_str[16];
+              snprintf(volume_str, sizeof(volume_str), "%d%%", start_volume());
+              menu_cell_basic_draw(ctx, cell_layer, "Starting Volume", volume_str, NULL);
+              break;
+            }
 #endif
           }
           break;
@@ -572,7 +643,11 @@ static void menu_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, v
               s_settings->konamic_code_on = !s_settings->konamic_code_on;
               break;
             case MAIN_MENU_VIBEPATTERN_ITEM:
-              s_settings->vibe_pattern = (s_settings->vibe_pattern == VP_NSG2Snooze ? VP_Gentle : s_settings->vibe_pattern + 1);
+              s_settings->vibe_pattern = (s_settings->vibe_pattern + 1) % VP_COUNT;
+#if SYSTEM_VIBES
+              // Give a short sample of the system patterns
+              preview_vibe_pattern(s_settings->vibe_pattern);
+#endif
               break;
             case MAIN_MENU_AUTOCLOSE_ITEM:
               s_settings->autoclose_timeout = (s_settings->autoclose_timeout + 1) % 11;
@@ -581,7 +656,15 @@ static void menu_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, v
             case MAIN_MENU_ALARMSOUND_ITEM:
               // Cycle through the sound options and play a short preview of the new one
               s_settings->alarm_sound = (s_settings->alarm_sound + 1) % AS_Count;
-              preview_alarm_sound(s_settings->alarm_sound);
+              preview_alarm_sound();
+              break;
+            case MAIN_MENU_SOUNDONLY_ITEM:
+              s_settings->sound_only = !s_settings->sound_only;
+              break;
+            case MAIN_MENU_STARTVOLUME_ITEM:
+              // Cycle 10%, 20% ... 100%, and play the sound at the new volume
+              s_settings->sound_start_volume = (start_volume() >= 100) ? 10 : start_volume() + 10;
+              preview_alarm_sound();
               break;
 #endif
           }
@@ -789,6 +872,10 @@ static void click_config_provider(void *context) {
 }
 
 static void handle_window_unload(Window* window) {
+#if ALARM_SOUND
+  // Don't let a sound preview carry on after leaving Settings
+  stop_preview();
+#endif
   destroy_ui();
 }
 

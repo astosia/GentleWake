@@ -12,7 +12,7 @@ static char current_time[] = "00:00 AM";
 static char s_time_digits[8];
 static char s_time_ampm[3];
 static bool s_alarms_on;
-static char s_info[48];
+static char s_info[52];
 static char s_onoff_text[40];
 static enum onoff_modes s_onoff_mode;
 static uint8_t s_autoclose_timeout;

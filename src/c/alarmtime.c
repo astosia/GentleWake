@@ -21,9 +21,9 @@ static char s_alarmtitle[MAX_TITLE];
 static enum part s_selected = HOUR;
 static AlarmTimeCallBack s_set_event;
 
-// Aplite is very short of memory once the main window and Settings are open, so there the
-// action bar is drawn directly by the time layer, loading each icon only while it is drawn,
-// instead of keeping an ActionBarLayer and three bitmaps in memory
+// Aplite runs out of memory once the main window and Settings are open.
+// So draw action bar with the time layer, loading each icon only while it is drawn,
+// instead of keeping ActionBarLayer and three bitmaps in memory
 #ifdef PBL_PLATFORM_APLITE
 #define DRAW_OWN_ACTION_BAR 1
 #define OWN_BAR_WIDTH ACTION_BAR_WIDTH
@@ -74,18 +74,16 @@ static Layer *time_layer;
 #define TIME_TEXT_DY 0
 #endif
 
-// Text is drawn in a rect a little taller than the highlight box, because Pebble skips drawing
-// a line of text entirely if the rect is shorter than the font's line height
 #define TEXT_RECT(box) GRect((box).origin.x, (box).origin.y + TIME_TEXT_DY, (box).size.w, (box).size.h + 10)
 
 #ifdef DRAW_OWN_ACTION_BAR
-// Loads one icon, draws it centred on (cx, cy), and frees it again straight away
-static void draw_bar_icon(GContext *ctx, uint32_t resource_id, int16_t cx, int16_t cy) {
-  GBitmap *bmp = gbitmap_create_with_resource(resource_id);
-  if (bmp == NULL) return;
-  GRect img = gbitmap_get_bounds(bmp);
-  graphics_draw_bitmap_in_rect(ctx, bmp, GRect(cx - (img.size.w / 2), cy - (img.size.h / 2), img.size.w, img.size.h));
-  gbitmap_destroy(bmp);
+// Loads one icon, draws it centred on (centreX, centreY), and frees it again straight away
+static void draw_bar_icon(GContext *ctx, uint32_t resource_id, int16_t centreX, int16_t centreY) {
+  GBitmap *iconbitmap = gbitmap_create_with_resource(resource_id);
+  if (iconbitmap == NULL) return;
+  GRect image = gbitmap_get_bounds(iconbitmap);
+  graphics_draw_bitmap_in_rect(ctx, iconbitmap, GRect(centreX - (image.size.w / 2), centreY - (image.size.h / 2), image.size.w, image.size.h));
+  gbitmap_destroy(iconbitmap);
 }
 
 // Draws a white action bar with the up/next/down icons down the right-hand edge
@@ -96,10 +94,10 @@ static void draw_own_action_bar(GContext *ctx, GRect bounds) {
   
   graphics_context_set_compositing_mode(ctx, GCompOpAssign);
   int16_t icon_x = bar_x + (OWN_BAR_WIDTH / 2);
-  int16_t cy = bounds.size.h / 2;
-  draw_bar_icon(ctx, RESOURCE_ID_IMAGE_UPACTION2, icon_x, cy - 50);
-  draw_bar_icon(ctx, RESOURCE_ID_IMG_NEXTACTION, icon_x, cy);
-  draw_bar_icon(ctx, RESOURCE_ID_IMAGE_DOWNACTION2, icon_x, cy + 50);
+  int16_t centreY = bounds.size.h / 2;
+  draw_bar_icon(ctx, RESOURCE_ID_IMAGE_UPACTION2, icon_x, centreY - 50);
+  draw_bar_icon(ctx, RESOURCE_ID_IMG_NEXTACTION, icon_x, centreY);
+  draw_bar_icon(ctx, RESOURCE_ID_IMAGE_DOWNACTION2, icon_x, centreY + 50);
 }
 #endif
 
@@ -110,26 +108,26 @@ static void draw_time(Layer *layer, GContext *ctx) {
 #endif
   // Centre the picker in the area left of the action bar
   bounds.size.w -= OWN_BAR_WIDTH;
-  int16_t cx = bounds.size.w / 2;
-  int16_t cy = bounds.size.h / 2;
+  int16_t centreX = bounds.size.w / 2;
+  int16_t centreY = bounds.size.h / 2;
   
   graphics_context_set_text_color(ctx, GColorWhite);
   // Draw title
   graphics_draw_text(ctx, s_alarmtitle, s_res_title_font, 
-                     GRect(3+PBL_IF_ROUND_ELSE(IF_BIG_ELSE(14, 10), 0), cy+TITLE_Y, bounds.size.w-6, TITLE_H), 
+                     GRect(3+PBL_IF_ROUND_ELSE(IF_BIG_ELSE(14, 10), 0), centreY+TITLE_Y, bounds.size.w-6, TITLE_H), 
                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   
   // Draw separater
-  graphics_draw_text(ctx, ":", s_res_time_font, TEXT_RECT(GRect(cx-(SEP_W/2), cy+TIME_BOX_Y, SEP_W, TIME_BOX_H)), 
+  graphics_draw_text(ctx, ":", s_res_time_font, TEXT_RECT(GRect(centreX-(SEP_W/2), centreY+TIME_BOX_Y, SEP_W, TIME_BOX_H)), 
                      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   
   // Draw AM/PM indicator
   if (!clock_is_24h_style())
-    graphics_draw_text(ctx, s_hour >= 12 ? "PM" : "AM", s_res_ampm_font, GRect(cx-(AMPM_W/2), cy+AMPM_Y, AMPM_W, AMPM_H), 
+    graphics_draw_text(ctx, s_hour >= 12 ? "PM" : "AM", s_res_ampm_font, GRect(centreX-(AMPM_W/2), centreY+AMPM_Y, AMPM_W, AMPM_H), 
                      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   
-  GRect hour_rect = GRect(cx-TIME_BOX_W-HOUR_GAP, cy+TIME_BOX_Y, TIME_BOX_W, TIME_BOX_H);
-  GRect minute_rect = GRect(cx+MINUTE_GAP, cy+TIME_BOX_Y, TIME_BOX_W, TIME_BOX_H);
+  GRect hour_rect = GRect(centreX-TIME_BOX_W-HOUR_GAP, centreY+TIME_BOX_Y, TIME_BOX_W, TIME_BOX_H);
+  GRect minute_rect = GRect(centreX+MINUTE_GAP, centreY+TIME_BOX_Y, TIME_BOX_W, TIME_BOX_H);
   
   // Set highlighted component
   graphics_context_set_fill_color(ctx, GColorWhite);
@@ -155,9 +153,8 @@ static void initialise_ui(void) {
   
 #if BIG_SCREEN
   s_res_title_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
-  // Custom Roboto Bold 42 for the hour and minute digits (bundled font, freed in destroy_ui)
+  // Custom Roboto Bold 42 for the hour and minute digits
   s_res_time_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_ROBOTO_BOLD_42));
-  // AM/PM uses the same Roboto as the digits (as the older watches use Bitham 30 for both)
   s_res_ampm_font = s_res_time_font;
 #else
   s_res_title_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);

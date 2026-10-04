@@ -68,12 +68,30 @@ time_t get_UTC_offset(struct tm *t) {
   // SDK2 uses localtime instead of UTC for all time functions so always return 0
   return 0; 
 #else
-  if (t == NULL) {
-    time_t temp = time(NULL);
-    t = localtime(&temp);
-  }
+  time_t now = time(NULL);
+  if (t == NULL) t = localtime(&now);
   
-  return t->tm_gmtoff + ((t->tm_isdst > 0) ? 3600 : 0);
+  // Work the offset out from the local clock time itself, rather than from tm_gmtoff and
+  // tm_isdst. Firmware versions disagree on those: older firmware gives tm_gmtoff without
+  // summer time (so it had to be added), but current PebbleOS already includes it, which
+  // made summer time count twice (e.g. UTC+2 instead of UTC+1 in the UK in summer).
+  int32_t local_secs = (t->tm_hour * 3600) + (t->tm_min * 60) + t->tm_sec;
+  int32_t utc_secs = now % (24 * 60 * 60);
+  
+  // Local time can be on the day before or after UTC: compare the days of the week
+  // (1 Jan 1970, time 0, was a Thursday = 4)
+  int8_t utc_wday = ((now / (24 * 60 * 60)) + 4) % 7;
+  int8_t day_shift = t->tm_wday - utc_wday;
+  if (day_shift > 1) day_shift -= 7;
+  else if (day_shift < -1) day_shift += 7;
+  
+  int32_t offset = local_secs - utc_secs + (day_shift * 24 * 3600);
+  
+  // Every real time zone is a whole number of 15 minutes, so round to that. This also caters for
+  // the clock ticking over a second between localtime() and time(NULL).
+  offset = ((offset + (offset >= 0 ? 450 : -450)) / 900) * 900;
+  
+  return offset;
 #endif 
 }
 

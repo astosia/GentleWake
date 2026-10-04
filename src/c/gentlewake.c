@@ -58,7 +58,7 @@
 
 static bool s_alarms_on = true;
 static alarm s_alarms[7];
-static char s_info[48];
+static char s_info[52];
 static WakeupId s_wakeup_id;
 static WakeupId s_wakeup_goob_id;
 static time_t s_snooze_until;
@@ -575,10 +575,17 @@ static void set_onetime_enabled(bool enabled) {
 static void start_accel();
 
 #if ALARM_SOUND
-// Notes for one alarm step. Each vibration segment can become a note plus a rest (for the chime),
-// and a step has at most 5 segments
-#define MAX_ALARM_NOTES 10
+// Notes for one alarm step. Chime and Beeps follow the vibration segments; a long system
+// pattern such as Reveille can have over 120 segments. 256 is the most the speaker accepts.
+#define MAX_ALARM_NOTES 256
 static SpeakerNote s_alarm_notes[MAX_ALARM_NOTES];
+
+// System sounds (Reveille, etc.) loop on their own while the alarm rings
+#define TONE_GAP_MS 1000          // pause between repeats of a system sound
+#define VOLUME_RAMP_SECS 60       // system sounds reach full volume after this long
+static AppTimer *s_tone_timer = NULL;
+static time_t s_sound_start = 0;  // when the current ringing started (for the volume ramp)
+static bool s_tone_ok = false;    // whether the system sound started
 
 // Stops the speaker, but only if it is actually playing (stopping it mid-tone, or when it is
 // already idle, can make the speaker pop)
@@ -586,9 +593,50 @@ static void stop_speaker_if_playing() {
   if (speaker_get_status() != SpeakerStatusIdle) speaker_stop();
 }
 
+static bool alarm_ringing() {
+  return (s_alarm_active || s_goob_active) && !s_state.snoozing;
+}
+
+static uint8_t start_volume() {
+  return s_settings.sound_start_volume ? s_settings.sound_start_volume : DEFAULT_START_VOLUME;
+}
+
+// Volume for a system sound: rises from the starting volume to 100% over VOLUME_RAMP_SECS
+static uint8_t tone_volume() {
+  uint8_t start = start_volume();
+  time_t elapsed = time(NULL) - s_sound_start;
+  if (elapsed >= VOLUME_RAMP_SECS) return 100;
+  if (elapsed < 0) elapsed = 0;
+  return start + ((100 - start) * elapsed) / VOLUME_RAMP_SECS;
+}
+
+static void play_system_tone() {
+  const SpeakerNote *notes;
+  uint16_t count = sys_tone_get(s_settings.alarm_sound - AS_SysFirst, &notes, 0);
+  stop_speaker_if_playing();
+  s_tone_ok = speaker_play_notes(notes, count, tone_volume());
+}
+
+static void handle_tone_timer(void *data) {
+  s_tone_timer = NULL;
+  if (alarm_ringing() && !speaker_is_muted()) play_system_tone();
+}
+
+// True when the sound restarts with each repeat of the vibration rather than looping on its own
+// (Reveille sound with the Reveille vibration, which match beat for beat)
+static bool s_tone_synced = false;
+
+// Called when speaker playback ends. Repeats a system sound after a short gap while the alarm
+// is still ringing. (Also called after Settings previews, which the checks below ignore.)
+static void handle_speaker_finished(SpeakerFinishReason reason, void *context) {
+  if (reason == SpeakerFinishReasonDone && !s_tone_synced && s_settings.alarm_sound >= AS_SysFirst &&
+      s_settings.alarm_sound < AS_Count && alarm_ringing() && s_tone_timer == NULL)
+    s_tone_timer = app_timer_register(TONE_GAP_MS, handle_tone_timer, NULL);
+}
+
 // Adds a note to the alarm sound, trimming it so the whole sound stays within max_ms.
-// Returns false once the time budget is used up.
-static bool add_alarm_note(uint8_t *n, uint32_t *total_ms, uint32_t max_ms, uint8_t midi_note, SpeakerWaveform waveform, uint32_t dur) {
+// Returns false once the time budget or the note buffer is used up.
+static bool add_alarm_note(uint16_t *n, uint32_t *total_ms, uint32_t max_ms, uint8_t midi_note, SpeakerWaveform waveform, uint32_t dur) {
   if (*n >= MAX_ALARM_NOTES || *total_ms >= max_ms) return false;
   if (*total_ms + dur > max_ms) dur = max_ms - *total_ms;
   s_alarm_notes[(*n)++] = (SpeakerNote){ .midi_note = midi_note, .waveform = waveform, .duration_ms = dur };
@@ -596,16 +644,27 @@ static bool add_alarm_note(uint8_t *n, uint32_t *total_ms, uint32_t max_ms, uint
   return true;
 }
 
-// Plays the sound for one step of the alarm, timed to match that step's vibration segments
-// (segments alternate on/off, starting with on). The volume rises from quiet on the first step
-// to full volume on the last. The sound is trimmed to max_ms so that it always finishes before
-// the next step starts and never has to be cut off (which pops). Returns true if a sound started.
-static bool play_alarm_sound(const uint32_t *segments, uint8_t num_segments, uint8_t step, uint8_t num_steps, bool strong, uint32_t max_ms) {
+// Plays the sound for one step of the alarm. Returns true if a sound is playing.
+// - Chime and Beeps are timed to match this step's vibration segments (which alternate on/off,
+//   starting with on), trimmed to max_ms so they always finish before the next step starts and
+//   never need cutting off (which pops). Their volume rises step by step to 100%.
+// - System sounds start on the first step and then loop on their own (handle_speaker_finished).
+//   If one was interrupted (e.g. by a notification), it is restarted on a later step.
+//   A sound that matches the vibration (s_tone_synced) instead restarts with every step, so the
+//   two stay in time. It is shorter than the step, so it has always finished by then.
+static bool alarm_step_sound(const uint32_t *segments, uint8_t num_segments, uint8_t step, uint8_t num_steps, uint32_t max_ms) {
   uint8_t mode = s_settings.alarm_sound;
-  if (mode == AS_VibeOnly || speaker_is_muted()) return false;
+  if (mode == AS_Off || mode >= AS_Count || speaker_is_muted()) return false;
   
-  bool chime = (mode == AS_VibeChime || mode == AS_ChimeOnly);
-  uint8_t n = 0;
+  if (mode >= AS_SysFirst) {
+    if (step == 0) s_sound_start = time(NULL);
+    if (s_tone_synced || (s_tone_timer == NULL && speaker_get_status() == SpeakerStatusIdle))
+      play_system_tone();
+    return s_tone_ok;
+  }
+  
+  bool chime = (mode == AS_Chime);
+  uint16_t n = 0;
   uint8_t on_count = 0;
   uint32_t total_ms = 0;
   
@@ -637,9 +696,9 @@ static bool play_alarm_sound(const uint32_t *segments, uint8_t num_segments, uin
   while (n > 0 && s_alarm_notes[n - 1].midi_note == 0) n--;
   if (n == 0) return false;
   
-  // Gentle patterns start quietly; Not-So-Gentle and Get Out Of Bed start louder
-  uint8_t start_volume = strong ? 50 : 15;
-  uint8_t volume = (num_steps > 1) ? start_volume + ((100 - start_volume) * step) / (num_steps - 1) : 100;
+  // Volume rises from the starting volume on the first step to full volume on the last
+  uint8_t start = start_volume();
+  uint8_t volume = (num_steps > 1) ? start + ((100 - start) * step) / (num_steps - 1) : 100;
   
   // The previous step's sound should have finished by now (see max_ms), but make sure
   stop_speaker_if_playing();
@@ -650,13 +709,27 @@ static bool play_alarm_sound(const uint32_t *segments, uint8_t num_segments, uin
 // Stops any alarm sound that is playing
 static void stop_alarm_sound() {
 #if ALARM_SOUND
+  if (s_tone_timer) {
+    app_timer_cancel(s_tone_timer);
+    s_tone_timer = NULL;
+  }
+  s_tone_ok = false;
   stop_speaker_if_playing();
 #endif
 }
 
+// Stops everything the ringing alarm is doing: the sound, and any vibration still queued.
+// (A step hands its whole vibration pattern to the watch at once, and system patterns such as
+// Reveille run for up to 15 seconds, so the rest has to be cancelled explicitly.)
+// The vibration is only cancelled if an alarm is actually ringing, so other buzzes are left alone.
+static void stop_alarm_output() {
+  if ((s_alarm_active || s_goob_active) && !s_state.snoozing) vibes_cancel();
+  stop_alarm_sound();
+}
+
 // Turns off an active alarm or cancels a snooze and sets wakeup for next alarm
 static void reset_alarm() {
-  stop_alarm_sound();
+  stop_alarm_output();
   int8_t next;
   
   s_alarm_active = false;
@@ -700,7 +773,7 @@ static void reset_alarm() {
 
 // Snoozes active alarm
 static void snooze_alarm() {
-  stop_alarm_sound();
+  stop_alarm_output();
   set_snoozing(true);
   set_snoozecount(s_state.snooze_count + 1);
   
@@ -716,6 +789,41 @@ static void handle_vibe_timer(void *data) {
   vibe_alarm();
 }
 
+#if SYSTEM_VIBES
+// Buffer for a system vibration pattern (Gentle (System) is the longest, at 179 segments)
+#define MAX_SYS_VIBE_SEGMENTS 180
+static uint32_t s_sys_vibe_buf[MAX_SYS_VIBE_SEGMENTS];
+// System patterns repeat for roughly as long as the Gentle Wake patterns ring (about 70 s)
+// before the alarm auto-snoozes
+#define SYS_VIBE_RING_MS 70000
+#endif
+
+// Called when the alarm has played its whole pattern without being stopped or snoozed
+static void alarm_pattern_finished() {
+  if (((s_settings.dynamic_snooze ? 3 : s_settings.snooze_delay) * s_state.snooze_count) > 60)
+    // Reset alarm if snoozed for more than 1 hour
+    reset_alarm();
+  else
+    // Auto-snooze if not turned off
+    snooze_alarm();
+}
+
+// Starts one step of the alarm: its vibration and any sound. step_ms is the time until the next step.
+// tone_synced is true when the system sound matches this vibration and should restart with it.
+static void alarm_step(VibePattern pat, uint8_t step, uint8_t num_steps, uint32_t step_ms, bool tone_synced) {
+  bool vibrate = true;
+#if ALARM_SOUND
+  s_tone_synced = tone_synced;
+  // Sounds timed to the vibration must end 150 ms before the next step starts
+  bool sound_playing = alarm_step_sound(pat.durations, pat.num_segments, step, num_steps, step_ms - 150);
+  // "Vibrate With Sound: No" skips the vibration, but only if a sound is actually playing.
+  // If the speaker is muted (e.g. Quiet Time) or unavailable, vibrate anyway so the alarm
+  // is never silent.
+  if (sound_playing && s_settings.sound_only) vibrate = false;
+#endif
+  if (vibrate) vibes_enqueue_custom_pattern(pat);
+}
+
 // Activate vibration for the alarm
 static void vibe_alarm() {
   if (s_vibe_timer) {
@@ -725,6 +833,31 @@ static void vibe_alarm() {
   
   if ((s_alarm_active || s_goob_active) && ! s_state.snoozing) {
     // If still active and not snoozing
+    
+#if SYSTEM_VIBES
+    if (!s_goob_active && s_settings.vibe_pattern >= VP_SysFirst && s_settings.vibe_pattern < VP_COUNT) {
+      // System pattern: play the whole pattern each step, with the system's pause between repeats
+      uint32_t play_ms, gap_ms;
+      VibePattern pat;
+      pat.durations = s_sys_vibe_buf;
+      pat.num_segments = sys_vibe_get(s_settings.vibe_pattern - VP_SysFirst, s_sys_vibe_buf,
+                                      MAX_SYS_VIBE_SEGMENTS, 0, &play_ms, &gap_ms);
+      uint32_t step_ms = play_ms + gap_ms;
+      uint8_t num_steps = (SYS_VIBE_RING_MS + step_ms - 1) / step_ms;
+      
+      if (s_vibe_count >= num_steps) {
+        alarm_pattern_finished();
+      } else {
+        s_vibe_timer = app_timer_register(step_ms, handle_vibe_timer, NULL);
+        // Keep the Reveille sound in step with the Reveille vibration
+        bool tone_synced = (s_settings.vibe_pattern - VP_SysFirst == SYS_VIBE_REVEILLE) &&
+                           (s_settings.alarm_sound == AS_SysFirst + SYS_TONE_REVEILLE);
+        alarm_step(pat, s_vibe_count, num_steps, step_ms, tone_synced);
+        s_vibe_count++;
+      }
+      return;
+    }
+#endif
     
     uint8_t pattern_length = 0;
     uint8_t (*vibe_patterns)[3];
@@ -767,40 +900,19 @@ static void vibe_alarm() {
     
     if (s_vibe_count >= pattern_length) {
       // If we've reach the end of the vibrate patterns...
-      
-      if (((s_settings.dynamic_snooze ? 3 : s_settings.snooze_delay) * s_state.snooze_count) > 60)
-        // Reset alarm if snoozed for more than 1 hour
-        reset_alarm();
-      else
-        // Auto-snooze if not turned off
-        snooze_alarm();
+      alarm_pattern_finished();
     } else {
       // Make increasingly long vibrate patterns for the alarm
       
       // Setup timer event for next vibe using pattern array
-      if (s_vibe_count < pattern_length) {
-        s_vibe_timer = app_timer_register(vibe_patterns[s_vibe_count][0]*1000, handle_vibe_timer, NULL);
-      }
+      uint32_t step_ms = vibe_patterns[s_vibe_count][0] * 1000;
+      s_vibe_timer = app_timer_register(step_ms, handle_vibe_timer, NULL);
       
-      // Start current vibe using pattern and segment arrays
+      // Start current vibe (and any sound) using pattern and segment arrays
       VibePattern pat;
       pat.durations = vibe_segments[vibe_patterns[s_vibe_count][1]];
       pat.num_segments = vibe_patterns[s_vibe_count][2];
-      
-      bool vibrate = true;
-#if ALARM_SOUND
-      // Play the matching sound (if one is selected)
-      bool strong = s_goob_active || (vibe_segments == vibe_segments_strong);
-      // Sound must end 150 ms before the next step starts (the step delay is in seconds)
-      uint32_t max_sound_ms = (vibe_patterns[s_vibe_count][0] * 1000) - 150;
-      bool sound_playing = play_alarm_sound(pat.durations, pat.num_segments, s_vibe_count, pattern_length, strong, max_sound_ms);
-      // The sound-only options skip the vibration, but only if the sound actually started.
-      // If the speaker is muted (e.g. Quiet Time) or unavailable, vibrate anyway so the alarm
-      // is never silent.
-      if (sound_playing && (s_settings.alarm_sound == AS_ChimeOnly || s_settings.alarm_sound == AS_BeepsOnly))
-        vibrate = false;
-#endif
-      if (vibrate) vibes_enqueue_custom_pattern(pat);
+      alarm_step(pat, s_vibe_count, pattern_length, step_ms, false);
       
       s_vibe_count++;
     }
@@ -1207,6 +1319,11 @@ static bool persist_bool(const uint32_t persist_key, bool default_val) {
 
 static void init(void) {
   
+#if ALARM_SOUND
+  // Lets system alarm sounds repeat when they finish
+  speaker_set_finish_callback(handle_speaker_finished, NULL);
+#endif
+  
   // Load all the settings
   persist_read_data(ALARMS_KEY, s_alarms, sizeof(s_alarms));
   
@@ -1410,7 +1527,7 @@ static void update_app_glance(AppGlanceReloadSession *session, size_t limit, voi
 
 static void deinit(void) {
   
-  stop_alarm_sound();
+  stop_alarm_output();
   if (s_accel_service_sub) accel_data_service_unsubscribe();
 #ifndef PBL_PLATFORM_APLITE
   app_glance_reload(update_app_glance, NULL);

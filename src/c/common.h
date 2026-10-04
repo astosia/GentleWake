@@ -25,8 +25,7 @@
 #define IF_2(sdk2)
 #endif
 
-// Screen size class. "Big" screens are the Pebble Time 2 (emery, 200x228) and the
-// Pebble Round 2 (gabbro, 260x260). Everything else is 144x168 or 180x180.
+// Screen size class: "Big" screens are Pebble Time 2 (emery, 200x228) and Pebble Round 2 (gabbro, 260x260)
 #if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO) || \
     (defined(PBL_DISPLAY_WIDTH) && PBL_DISPLAY_WIDTH >= 200)
 #define BIG_SCREEN 1
@@ -36,16 +35,16 @@
 #define IF_BIG_ELSE(big, small) (small)
 #endif
 
-// Alarm sounds: the Pebble Time 2 (emery) and Pebble 2 Duo (flint) have speakers.
-// The Round 2 (gabbro) has no speaker, so it is excluded explicitly.
+// Alarm sounds: only the Pebble Time 2 (emery) and Pebble 2 Duo (flint) have speakers.
+// The SDK defines PBL_SPEAKER on other platforms too (e.g. basalt, and gabbro, which has no
+// speaker), so the platforms have to be checked as well.
 #if defined(PBL_SPEAKER) && (defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT))
 #define ALARM_SOUND 1
 #else
 #define ALARM_SOUND 0
 #endif
 
-// Width of the (narrowed) action bar on rectangular watches. Every window uses this
-// value so the action bar stays the same width when moving between screens.
+// Width of the action bar on rect watches. Every window uses the same width
 #ifdef PBL_RECT
 #undef ACTION_BAR_WIDTH
 #if BIG_SCREEN
@@ -72,18 +71,38 @@ typedef enum MoveSensitivity {
 typedef enum VibePatterns {
   VP_Gentle = 0,
   VP_NSG = 1, // Not-So-Gentle
-  VP_NSG2Snooze = 2
+  VP_NSG2Snooze = 2,
+  VP_SysFirst = 3   // System patterns (see alarmpatterns.c) are VP_SysFirst + index
 } VibePatterns;
+
+// Number of system vibration patterns and system sounds in alarmpatterns.c
+#define SYS_VIBE_COUNT 11
+#define SYS_TONE_COUNT 4
+
+// The Reveille sound is written beat-for-beat to match the Reveille vibration, so when both are
+// chosen they're kept in step (positions in the tables in alarmpatterns.c)
+#define SYS_VIBE_REVEILLE 3
+#define SYS_TONE_REVEILLE 0
+
+// System vibration patterns aren't offered on aplite, which has no memory to spare
+#ifdef PBL_PLATFORM_APLITE
+#define SYSTEM_VIBES 0
+#define VP_COUNT VP_SysFirst
+#else
+#define SYSTEM_VIBES 1
+#define VP_COUNT (VP_SysFirst + SYS_VIBE_COUNT)
+#endif
 
 // Alarm sound options (only offered on watches with a speaker - see ALARM_SOUND above)
 typedef enum AlarmSound {
-  AS_VibeOnly = 0,
-  AS_VibeChime = 1,
-  AS_VibeBeeps = 2,
-  AS_ChimeOnly = 3,
-  AS_BeepsOnly = 4,
-  AS_Count = 5
+  AS_Off = 0,        // Vibrate only
+  AS_Chime = 1,      // Soft chime, timed to the vibration
+  AS_Beeps = 2,      // Beeps, timed to the vibration
+  AS_SysFirst = 3,   // System sounds (Reveille, Beacon, Bell, System Chime) are AS_SysFirst + index
+  AS_Count = AS_SysFirst + SYS_TONE_COUNT
 } AlarmSound;
+
+#define DEFAULT_START_VOLUME 20   // used when sound_start_volume is 0 (not set yet)
 
 typedef enum GooBMode {
   GM_Off = 0,
@@ -106,8 +125,10 @@ struct Settings_st {
   uint8_t autoclose_timeout;
   GooBMode goob_mode;
   uint8_t goob_monitor_period;
-  uint8_t alarm_sound;   // AlarmSound value. Added in 4.1 at the end of the struct, so settings
-                         // saved by older versions load with this as 0 (vibrate only).
+  // Added in 4.1 at the end of the struct, so settings saved by older versions load these as 0
+  uint8_t alarm_sound;          // AlarmSound value (0 = off)
+  bool sound_only;              // true = don't vibrate when a sound is playing (0 = vibrate too)
+  uint8_t sound_start_volume;   // starting volume in % (0 = DEFAULT_START_VOLUME)
 } __attribute__((__packed__));
 
 typedef enum AlarmDay {
@@ -128,3 +149,26 @@ time_t strip_time(time_t timestamp);
 int64_t day_diff(time_t date1, time_t date2);
 time_t get_UTC_offset(struct tm *t);
 WeekDay ad2wd(AlarmDay alarmday);
+
+// ---- System alarm vibration patterns and sounds, recreated from PebbleOS (alarmpatterns.c) ----
+
+#if SYSTEM_VIBES
+// Name of a system vibration pattern, for the Settings menu
+const char* sys_vibe_name(uint8_t index);
+
+// Copies a system vibration pattern into buffer (on/off durations, starting with on) and
+// returns the number of segments. If max_ms is non-zero, the pattern is cut short to fit
+// (for previews). play_ms receives the pattern's length and gap_ms the pause the system
+// leaves before repeating it. Either can be NULL.
+uint8_t sys_vibe_get(uint8_t index, uint32_t *buffer, uint8_t max_segments, uint32_t max_ms,
+                     uint32_t *play_ms, uint32_t *gap_ms);
+#endif
+
+#if ALARM_SOUND
+// Name of a system alarm sound, for the Settings menu
+const char* sys_tone_name(uint8_t index);
+
+// Points notes at a system alarm sound and returns the number of notes. If max_ms is
+// non-zero, only the notes that fit within max_ms are counted (for previews).
+uint16_t sys_tone_get(uint8_t index, const SpeakerNote **notes, uint32_t max_ms);
+#endif
