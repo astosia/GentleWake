@@ -36,8 +36,7 @@
 #endif
 
 // Alarm sounds: only the Pebble Time 2 (emery) and Pebble 2 Duo (flint) have speakers.
-// The SDK defines PBL_SPEAKER on other platforms too (e.g. basalt, and gabbro, which has no
-// speaker), so the platforms have to be checked as well.
+// backstop to check the platforms too.
 #if defined(PBL_SPEAKER) && (defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT))
 #define ALARM_SOUND 1
 #else

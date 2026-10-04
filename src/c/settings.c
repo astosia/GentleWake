@@ -35,8 +35,8 @@
 #define MAIN_MENU_DYNAMICSNOOZE_ITEM 1
 #define MAIN_MENU_EASYLIGHT_ITEM 2
 #define MAIN_MENU_KONAMICODE_ITEM 3
-#define MAIN_MENU_VIBEPATTERN_ITEM 4
-#define MAIN_MENU_AUTOCLOSE_ITEM 5
+#define MAIN_MENU_AUTOCLOSE_ITEM 4
+#define MAIN_MENU_VIBEPATTERN_ITEM 5
 #define MAIN_MENU_ALARMSOUND_ITEM 6
 #define MAIN_MENU_SOUNDONLY_ITEM 7
 #define MAIN_MENU_STARTVOLUME_ITEM 8
@@ -424,9 +424,10 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
                                    s_settings->sound_only ? "No (sound only)" : "Yes", NULL);
               break;
             case MAIN_MENU_STARTVOLUME_ITEM: {
-              // Volume the alarm sound starts at (it rises to 100%)
-              char volume_str[16];
-              snprintf(volume_str, sizeof(volume_str), "%d%%", start_volume());
+              // Volume the alarm sound starts at (it rises to 100%). Apps' sounds are scaled by the
+              // watch's own speaker volume, so this is a percentage of that.
+              char volume_str[24];
+              snprintf(volume_str, sizeof(volume_str), "%d%% of watch volume", start_volume());
               menu_cell_basic_draw(ctx, cell_layer, "Starting Volume", volume_str, NULL);
               break;
             }

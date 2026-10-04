@@ -835,8 +835,11 @@ static void vibe_alarm() {
     // If still active and not snoozing
     
 #if SYSTEM_VIBES
-    if (!s_goob_active && s_settings.vibe_pattern >= VP_SysFirst && s_settings.vibe_pattern < VP_COUNT) {
-      // System pattern: play the whole pattern each step, with the system's pause between repeats
+    if (s_settings.vibe_pattern >= VP_SysFirst && s_settings.vibe_pattern < VP_COUNT) {
+      // System pattern: play the whole pattern each step, with the system's pause between repeats.
+      // This applies to the Get Out Of Bed alarm too, so a chosen system pattern (and a matching
+      // sound, e.g. Reveille) stays the same on every ring. With the original Gentle Wake
+      // patterns, Get Out Of Bed uses its own firmer pattern below instead.
       uint32_t play_ms, gap_ms;
       VibePattern pat;
       pat.durations = s_sys_vibe_buf;
