@@ -59,6 +59,22 @@ static alarm *s_alarms;
 static struct Settings_st *s_settings;
 static SettingsClosedCallBack s_settings_closed;
 static GFont s_header_font;
+
+// "Extra Large" text: on the Time 2 and Round 2, the watch's Text Size setting "Larger" maps to
+// the Extra Large content size. The firmware keeps third-party apps' standard menu rows at the
+// platform default (Large), so for Extra Large the rows are drawn here with the system's
+// Extra Large fonts and row heights instead (see draw_cell).
+#if BIG_SCREEN
+static bool s_extra_large = false;
+static GFont s_xl_title_font;
+static GFont s_xl_subtitle_font;
+#define XL_FONT_HEIGHT 28                     // Gothic 28 line height
+#define XL_HEADER_HEIGHT 38
+#define XL_ROW_HEIGHT PBL_IF_RECT_ELSE(64, 85) // system Extra Large row heights
+#define XL_ROUND_UNSELECTED_ROW_HEIGHT 52      // round: rows away from the centre show title only
+#else
+#define s_extra_large false
+#endif
   
 static Window *s_window;
 static MenuLayer *settings_layer;
@@ -67,7 +83,13 @@ static void initialise_ui(void) {
   GRect bounds;
   Layer *root_layer = NULL;
   s_window = window_create_fullscreen(&root_layer, &bounds);
-  s_header_font = fonts_get_system_font(IF_BIG_ELSE(FONT_KEY_GOTHIC_24_BOLD, FONT_KEY_GOTHIC_14_BOLD));
+#if BIG_SCREEN
+  s_extra_large = (preferred_content_size() == PreferredContentSizeExtraLarge);
+  s_xl_title_font = fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
+  s_xl_subtitle_font = fonts_get_system_font(FONT_KEY_GOTHIC_28);
+#endif
+  s_header_font = fonts_get_system_font(s_extra_large ? FONT_KEY_GOTHIC_28_BOLD :
+                                        IF_BIG_ELSE(FONT_KEY_GOTHIC_24_BOLD, FONT_KEY_GOTHIC_14_BOLD));
   
   // settings_layer
   settings_layer = menu_layer_create(bounds);
@@ -134,6 +156,9 @@ static int16_t menu_get_header_height_callback(MenuLayer *menu_layer, uint16_t s
         case MAIN_MENU_ALARM_SECTION:
           return 0;
         default:
+#if BIG_SCREEN
+          if (s_extra_large) return XL_HEADER_HEIGHT;
+#endif
           return IF_BIG_ELSE(34, MENU_CELL_BASIC_HEADER_HEIGHT);
       }
     case ML_Alarms:
@@ -273,6 +298,82 @@ static void preview_alarm_sound(void) {
 }
 #endif
 
+#if BIG_SCREEN
+// Returns the first of the fonts (largest first) in which text fits on one line of the given
+// width, so long items shrink to fit instead of being cut off with "..."
+static GFont fit_font(const char *text, const GFont *fonts, uint8_t num_fonts, int16_t width) {
+  for (uint8_t i = 0; i < num_fonts - 1; i++) {
+    GSize size = graphics_text_layout_get_content_size(text, fonts[i], GRect(0, 0, 1000, 100),
+                                                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+    if (size.w <= width) return fonts[i];
+  }
+  return fonts[num_fonts - 1];
+}
+
+// Draws one line of a row, shrinking the font if needed. The text keeps the same vertical
+// centre whatever font is used.
+static void draw_cell_line(GContext *ctx, const char *text, bool bold, GRect box, GTextAlignment alignment) {
+  // Gothic 28, 24 and 18, with how far each smaller size moves down to stay centred
+  const GFont fonts[] = {
+    bold ? s_xl_title_font : s_xl_subtitle_font,
+    fonts_get_system_font(bold ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_24),
+    fonts_get_system_font(bold ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_18),
+  };
+  static const int8_t nudge_down[] = {0, 2, 5};
+  
+  GFont font = fit_font(text, fonts, ARRAY_LENGTH(fonts), box.size.w);
+  for (uint8_t i = 0; i < ARRAY_LENGTH(fonts); i++)
+    if (font == fonts[i]) box.origin.y += nudge_down[i];
+  graphics_draw_text(ctx, text, font, box, GTextOverflowModeTrailingEllipsis, alignment, NULL);
+}
+
+// Draws a menu row at the Extra Large size, laid out like the firmware's standard rows
+static void draw_cell_extra_large(GContext *ctx, const Layer *cell_layer, const char *title, const char *subtitle) {
+  GRect bounds = layer_get_bounds(cell_layer);
+#ifdef PBL_RECT
+  // Title over subtitle, left-aligned with a 10px inset, centred vertically
+  int16_t full_height = XL_FONT_HEIGHT + (subtitle ? XL_FONT_HEIGHT : 0) + 10;
+  GRect box = GRect(10, (bounds.size.h - full_height) / 2, bounds.size.w - 14, XL_FONT_HEIGHT + 4);
+  if (title) draw_cell_line(ctx, title, true, box, GTextAlignmentLeft);
+  if (subtitle) {
+    box.origin.y += XL_FONT_HEIGHT;
+    draw_cell_line(ctx, subtitle, false, box, GTextAlignmentLeft);
+  }
+#else
+  // Round: centred text. As in the system menus, only the selected (centre) row shows its subtitle.
+  // Text is fitted to a width inside the circle's edge (rows above and below the centre are narrower).
+  bool show_subtitle = subtitle && menu_cell_layer_is_highlighted(cell_layer);
+  int16_t full_height = XL_FONT_HEIGHT + (show_subtitle ? XL_FONT_HEIGHT : 0);
+  // (Gothic leaves space above its letters, so nudge up a little to look centred)
+  GRect box = GRect(20, ((bounds.size.h - full_height) / 2) - 4, bounds.size.w - 40, XL_FONT_HEIGHT + 4);
+  if (title) draw_cell_line(ctx, title, true, box, GTextAlignmentCenter);
+  if (show_subtitle) {
+    box.origin.y += XL_FONT_HEIGHT;
+    draw_cell_line(ctx, subtitle, false, box, GTextAlignmentCenter);
+  }
+#endif
+}
+
+// Row heights for Extra Large (only used when s_extra_large)
+static int16_t menu_get_cell_height_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
+#ifdef PBL_ROUND
+  if (!menu_layer_is_index_selected(menu_layer, cell_index)) return XL_ROUND_UNSELECTED_ROW_HEIGHT;
+#endif
+  return XL_ROW_HEIGHT;
+}
+#endif
+
+// Draws a menu row: the standard system row, or an Extra Large one if the watch's Text Size is "Larger"
+static void draw_cell(GContext *ctx, const Layer *cell_layer, const char *title, const char *subtitle, GBitmap *icon) {
+#if BIG_SCREEN
+  if (s_extra_large) {
+    draw_cell_extra_large(ctx, cell_layer, title, subtitle);
+    return;
+  }
+#endif
+  menu_cell_basic_draw(ctx, cell_layer, title, subtitle, icon);
+}
+
 static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuIndex *cell_index, void *data) {
   char alarm_summary[16];
   bool is_mixed = false;
@@ -346,7 +447,7 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
                   }
                 }
               }
-              menu_cell_basic_draw(ctx, cell_layer, "Set Alarms", alarm_summary, NULL);
+              draw_cell(ctx, cell_layer, "Set Alarms", alarm_summary, NULL);
               break;
           }
           break;
@@ -356,45 +457,45 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
             case MAIN_MENU_SNOOZEDELAY_ITEM:
               // Set snooze time
               snprintf(snooze_str, sizeof(snooze_str), "%d minute(s)", s_settings->snooze_delay);
-              menu_cell_basic_draw(ctx, cell_layer, "Max Snooze Delay", snooze_str, NULL);
+              draw_cell(ctx, cell_layer, "Max Snooze Delay", snooze_str, NULL);
               break;
     
             case MAIN_MENU_DYNAMICSNOOZE_ITEM:
               // Enable/Disable Dynamic Snooze
-              menu_cell_basic_draw(ctx, cell_layer, "Dynamic Snooze", s_settings->dynamic_snooze ? "ON - Halves delay" : "OFF", NULL);
+              draw_cell(ctx, cell_layer, "Dynamic Snooze", s_settings->dynamic_snooze ? "ON: Halves delay" : "OFF", NULL);
               break;
             
             case MAIN_MENU_EASYLIGHT_ITEM:
               // Enable/Disable Easy Light
-              menu_cell_basic_draw(ctx, cell_layer, "Easy Light", s_settings->easy_light ? "ON - Hold up on alarm" : "OFF", NULL);
+              draw_cell(ctx, cell_layer, "Easy Light", s_settings->easy_light ? "ON: Hold up on alarm" : "OFF", NULL);
               break;
             
             case MAIN_MENU_KONAMICODE_ITEM:
               // Enable/Disable Konami Code
-              menu_cell_basic_draw(ctx, cell_layer, "Stop Alarm", s_settings->konamic_code_on ? "Konami Code" : "Double click", NULL);
+              draw_cell(ctx, cell_layer, "Stop Alarm", s_settings->konamic_code_on ? "Konami Code" : "Double click", NULL);
               break;
             
             case MAIN_MENU_VIBEPATTERN_ITEM:
               // Change the vibration level
               switch (s_settings->vibe_pattern) {
                 case VP_Gentle:
-                  menu_cell_basic_draw(ctx, cell_layer, "Vibration Pattern", "Gentle (Original)", NULL);
+                  draw_cell(ctx, cell_layer, "Vibration Pattern", "Gentle (Original)", NULL);
                   break;
                 case VP_NSG:
-                  menu_cell_basic_draw(ctx, cell_layer, "Vibration Pattern", "Not-So-Gentle (NSG)", NULL);
+                  draw_cell(ctx, cell_layer, "Vibration Pattern", "Not-So-Gentle (NSG)", NULL);
                   break;
                 case VP_NSG2Snooze:
-                  menu_cell_basic_draw(ctx, cell_layer, "Vibration Pattern", "NSG After 2 Snoozes", NULL);
+                  draw_cell(ctx, cell_layer, "Vibration Pattern", "NSG After 2 Snoozes", NULL);
                   break;
                 default:
 #if SYSTEM_VIBES
                   if (s_settings->vibe_pattern < VP_COUNT) {
-                    menu_cell_basic_draw(ctx, cell_layer, "Vibration Pattern", 
+                    draw_cell(ctx, cell_layer, "Vibration Pattern", 
                                          sys_vibe_name(s_settings->vibe_pattern - VP_SysFirst), NULL);
                     break;
                   }
 #endif
-                  menu_cell_basic_draw(ctx, cell_layer, "Vibration Pattern", "???", NULL);
+                  draw_cell(ctx, cell_layer, "Vibration Pattern", "???", NULL);
                   break;
               }
               break;
@@ -411,24 +512,24 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
                   snprintf(autoclose_str, sizeof(autoclose_str), "After %d Minutes", s_settings->autoclose_timeout);
                   break;
               }
-              menu_cell_basic_draw(ctx, cell_layer, "Auto Close", autoclose_str, NULL);
+              draw_cell(ctx, cell_layer, "Auto Close", autoclose_str, NULL);
               break;
 #if ALARM_SOUND
             case MAIN_MENU_ALARMSOUND_ITEM:
               // Show the alarm sound setting
-              menu_cell_basic_draw(ctx, cell_layer, "Alarm Sound", alarm_sound_name(s_settings->alarm_sound), NULL);
+              draw_cell(ctx, cell_layer, "Alarm Sound", alarm_sound_name(s_settings->alarm_sound), NULL);
               break;
             case MAIN_MENU_SOUNDONLY_ITEM:
               // Whether to vibrate as well as playing the sound
-              menu_cell_basic_draw(ctx, cell_layer, "Vibrate With Sound", 
+              draw_cell(ctx, cell_layer, "Vibrate With Sound", 
                                    s_settings->sound_only ? "No (sound only)" : "Yes", NULL);
               break;
             case MAIN_MENU_STARTVOLUME_ITEM: {
               // Volume the alarm sound starts at (it rises to 100%). Apps' sounds are scaled by the
               // watch's own speaker volume, so this is a percentage of that.
               char volume_str[24];
-              snprintf(volume_str, sizeof(volume_str), "%d%% of watch volume", start_volume());
-              menu_cell_basic_draw(ctx, cell_layer, "Starting Volume", volume_str, NULL);
+              snprintf(volume_str, sizeof(volume_str), "%d%% of watch vol", start_volume());
+              draw_cell(ctx, cell_layer, "Starting Volume", volume_str, NULL);
               break;
             }
 #endif
@@ -439,29 +540,29 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
           switch (cell_index->row) {
             case MAIN_MENU_SMARTALARM_ITEM:
               // Enable/Disable Smart Alarm
-              menu_cell_basic_draw(ctx, cell_layer, "Smart Alarm", s_settings->smart_alarm ? "ON - Alarm on stirring" : "OFF", NULL);
+              draw_cell(ctx, cell_layer, "Smart Alarm", s_settings->smart_alarm ? "ON: Alarm on stirring" : "OFF", NULL);
               break;
             
             case MAIN_MENU_SMARTPERIOD_ITEM:
               // Set single day alarm
               snprintf(monitor_str, sizeof(monitor_str), "%d minute(s)", s_settings->monitor_period);
-              menu_cell_basic_draw(ctx, cell_layer, "Monitor Period", monitor_str, NULL);
+              draw_cell(ctx, cell_layer, "Monitor Period", monitor_str, NULL);
               break;
             
             case MAIN_MENU_MOVESENSITIVITY_ITEM:
               // Adjust Smart Alarm movement sensitivity
               switch (s_settings->sensitivity) {
                 case MS_LOW:
-                  menu_cell_basic_draw(ctx, cell_layer, "Sensitivity", "Low", NULL);
+                  draw_cell(ctx, cell_layer, "Sensitivity", "Low", NULL);
                   break;
                 case MS_MEDIUM:
-                  menu_cell_basic_draw(ctx, cell_layer, "Sensitivity", "Medium", NULL);
+                  draw_cell(ctx, cell_layer, "Sensitivity", "Medium", NULL);
                   break;
                 case MS_HIGH:
-                  menu_cell_basic_draw(ctx, cell_layer, "Sensitivity", "High", NULL);
+                  draw_cell(ctx, cell_layer, "Sensitivity", "High", NULL);
                   break;
                 default:
-                  menu_cell_basic_draw(ctx, cell_layer, "Sensitivity", "???", NULL);
+                  draw_cell(ctx, cell_layer, "Sensitivity", "???", NULL);
                   break;
               }
               break;
@@ -478,7 +579,7 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
                   snprintf(goob_str, sizeof(goob_str), "%d min. after stop alarm", s_settings->goob_monitor_period);
                   break;
               }
-              menu_cell_basic_draw(ctx, cell_layer, "Get out of Bed Alm", goob_str, NULL);
+              draw_cell(ctx, cell_layer, "Get out of Bed Alm", goob_str, NULL);
               break;
           }
           break;
@@ -488,23 +589,23 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
             case MAIN_MENU_DSTDAYCHECK_ITEM:
               switch (s_settings->dst_check_day) {
                 case 0:
-                  menu_cell_basic_draw(ctx, cell_layer, "DST Check Day", "OFF", NULL);
+                  draw_cell(ctx, cell_layer, "DST Check Day", "OFF", NULL);
                   break;
                 case TUESDAY:
-                  menu_cell_basic_draw(ctx, cell_layer, "DST Check Day", "Tuesday", NULL);
+                  draw_cell(ctx, cell_layer, "DST Check Day", "Tuesday", NULL);
                   break;
                 case FRIDAY:
-                  menu_cell_basic_draw(ctx, cell_layer, "DST Check Day", "Friday", NULL);
+                  draw_cell(ctx, cell_layer, "DST Check Day", "Friday", NULL);
                   break;
                 default:
-                  menu_cell_basic_draw(ctx, cell_layer, "DST Check Day", "Sunday", NULL);
+                  draw_cell(ctx, cell_layer, "DST Check Day", "Sunday", NULL);
                   break;
               }
               break;
             
             case MAIN_MENU_DSTDAYHOUR_ITEM:
               snprintf(dst_check_hour_str, sizeof(dst_check_hour_str), "%d AM", s_settings->dst_check_hour);
-              menu_cell_basic_draw(ctx, cell_layer, "DST Check Hour", dst_check_hour_str, NULL);
+              draw_cell(ctx, cell_layer, "DST Check Hour", dst_check_hour_str, NULL);
               break;
           }
           break;
@@ -512,7 +613,7 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
         case MAIN_MENU_ABOUT_SECTION:
           switch (cell_index->row) {
             case MAIN_MENU_VERSION_ITEM:
-              menu_cell_basic_draw(ctx, cell_layer, "Version", VERSION, NULL);
+              draw_cell(ctx, cell_layer, "Version", VERSION, NULL);
               break;
           }
           break;
@@ -526,26 +627,26 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
           // Set One-Time alarm
           gen_alarm_str(&(s_settings->one_time_alarm), alarmtimestr, sizeof(alarmtimestr));
           if (s_settings->one_time_alarm.enabled)
-            snprintf(alarmstr, sizeof(alarmstr), "%s - Hold to turn off", alarmtimestr);
+            snprintf(alarmstr, sizeof(alarmstr), "%s: Hold = off", alarmtimestr);  //10:00AM: Hold = off
           else
-            snprintf(alarmstr, sizeof(alarmstr), "%s - Hold to turn on", alarmtimestr);
+            snprintf(alarmstr, sizeof(alarmstr), "%s: Hold to turn on", alarmtimestr);//OFF: Hold to turn on
       
-          menu_cell_basic_draw(ctx, cell_layer, "One-Time Alarm", alarmstr, NULL);
+          draw_cell(ctx, cell_layer, "One-Time Alarm", alarmstr, NULL);
           break;
     
         case 1:
           // Set alarm time for all days
           if (is_alarms_mixed()) {
-            strncpy(alarmstr, "Mixed - Hold to turn off", sizeof(alarmstr));
+            strncpy(alarmstr, "Mixed: Hold = off", sizeof(alarmstr));
           } else {
             gen_alarm_str(&s_alarms[0], alarmtimestr, sizeof(alarmtimestr));
             if (s_alarms[0].enabled)
-              snprintf(alarmstr, sizeof(alarmstr), "%s - Hold to turn off", alarmtimestr);
+              snprintf(alarmstr, sizeof(alarmstr), "%s: Hold = off", alarmtimestr);
             else
-              snprintf(alarmstr, sizeof(alarmstr), "%s - Hold to turn on", alarmtimestr);
+              snprintf(alarmstr, sizeof(alarmstr), "%s: Hold to turn on", alarmtimestr);
           }
       
-          menu_cell_basic_draw(ctx, cell_layer, "All Days", alarmstr, NULL);
+          draw_cell(ctx, cell_layer, "All Days", alarmstr, NULL);
           break;
     
         default:
@@ -553,10 +654,10 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
           dayname(cell_index->row-2, daystr, sizeof(daystr));
           gen_alarm_str(&s_alarms[cell_index->row-2], alarmtimestr, sizeof(alarmtimestr));
           if (s_alarms[cell_index->row-2].enabled)
-            snprintf(alarmstr, sizeof(alarmstr), "%s - Hold to turn off", alarmtimestr);
+            snprintf(alarmstr, sizeof(alarmstr), "%s: Hold = off", alarmtimestr);
           else
-            snprintf(alarmstr, sizeof(alarmstr), "%s - Hold to turn on", alarmtimestr);
-          menu_cell_basic_draw(ctx, cell_layer, daystr, alarmstr, NULL);
+            snprintf(alarmstr, sizeof(alarmstr), "%s: Hold to turn on", alarmtimestr);
+          draw_cell(ctx, cell_layer, daystr, alarmstr, NULL);
           break;
       }
       break;
@@ -897,6 +998,9 @@ void show_settings(alarm *alarms, struct Settings_st *settings, SettingsClosedCa
     .get_header_height = menu_get_header_height_callback,
     .draw_header = menu_draw_header_callback,
     .draw_row = menu_draw_row_callback,
+#if BIG_SCREEN
+    .get_cell_height = s_extra_large ? menu_get_cell_height_callback : NULL,
+#endif
   });
   
   window_set_click_config_provider(s_window, click_config_provider);
